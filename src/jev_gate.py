@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """Jev-backed PreToolUse gate for Claude Code.
 
-Reads a PreToolUse hook payload on stdin, asks Jev (TypeSafe System One) a few
-noul questions about the pending tool call, and returns a permission decision.
+Reads a PreToolUse hook payload on stdin, asks Jev a handful of noul questions
+about the pending tool call, and returns allow / ask / deny.
 
-Fails open: any error, timeout, or missing key -> no decision emitted, so
-Claude Code falls back to its normal permission flow.
+Fails open: any error, timeout, or missing key emits no decision, so Claude Code
+falls back to its normal permission flow.
 
 Env:
   TYPESAFE_API_KEY   required, else the hook no-ops
@@ -14,30 +14,15 @@ Env:
 """
 
 import json
-import os
-import ssl
 import sys
-import time
-import urllib.error
-import urllib.request
+from pathlib import Path
 
-API_URL = "https://api.typesafe.ai/v1/systemone"
-MODEL = "jev-latest"
-# Typical latency is ~350ms, but cold starts have been observed above 6s.
-# Generous enough to avoid failing open on a slow call, short enough that a
-# genuinely hung API doesn't stall the session.
-TIMEOUT_S = 12.0
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-# python.org builds ship without a usable CA bundle, so urllib fails TLS
-# verification. Find a real bundle rather than trusting the interpreter default,
-# since Claude Code may invoke this hook with any python on PATH.
-CA_CANDIDATES = (
-    os.environ.get("SSL_CERT_FILE"),
-    "/etc/ssl/cert.pem",
-    "/opt/homebrew/etc/ca-certificates/cert.pem",
-)
+from jev_client import JevError, api_key, ask_jev, disabled, log, read_payload
 
-# Tools worth paying for a classification on. Read-only tools are skipped.
+# Tools worth paying for a classification on. Read-only tools are skipped before
+# any network call.
 GATED_TOOLS = {"Bash", "Write", "Edit", "NotebookEdit", "KillShell"}
 
 # Per-question thresholds as (deny_at, ask_at). Tuned against tests/.
@@ -168,100 +153,44 @@ def build_state(payload: dict) -> str:
     return "\n\n".join(lines)
 
 
-def ssl_context() -> ssl.SSLContext:
-    for path in CA_CANDIDATES:
-        if path and os.path.exists(path):
-            return ssl.create_default_context(cafile=path)
-    try:
-        import certifi
-
-        return ssl.create_default_context(cafile=certifi.where())
-    except ImportError:
-        return ssl.create_default_context()
-
-
-def ask_jev(state: str, api_key: str) -> dict:
-    body = json.dumps({"model": MODEL, "state": state, "questions": QUESTIONS}).encode()
-    req = urllib.request.Request(
-        API_URL,
-        data=body,
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-        },
-        method="POST",
-    )
-    with urllib.request.urlopen(req, timeout=TIMEOUT_S, context=ssl_context()) as resp:
-        return json.loads(resp.read())
-
-
-def log(record: dict) -> None:
-    path = os.environ.get("JEV_GATE_LOG")
-    if not path:
-        return
-    try:
-        with open(os.path.expanduser(path), "a") as fh:
-            fh.write(json.dumps(record) + "\n")
-    except OSError:
-        pass
-
-
 def main() -> None:
-    if os.environ.get("JEV_GATE_DISABLE") == "1":
+    if disabled():
         emit(None)
 
-    api_key = os.environ.get("TYPESAFE_API_KEY")
-    if not api_key:
+    key = api_key()
+    if not key:
         emit(None)
 
-    try:
-        payload = json.load(sys.stdin)
-    except (json.JSONDecodeError, ValueError):
-        emit(None)
-
-    if payload.get("tool_name") not in GATED_TOOLS:
+    payload = read_payload()
+    if payload is None or payload.get("tool_name") not in GATED_TOOLS:
         emit(None)
 
     state = build_state(payload)
-    started = time.monotonic()
     try:
-        result = ask_jev(state, api_key)
-    except urllib.error.HTTPError as exc:
-        try:
-            detail = exc.read().decode()[:500]
-        except OSError:
-            detail = ""
-        log({"error": f"HTTP {exc.code}", "detail": detail, "tool": payload.get("tool_name")})
+        scores, elapsed_ms, usage = ask_jev(state, QUESTIONS, key)
+    except JevError as exc:
+        log({"hook": "gate", "error": str(exc), "tool": payload.get("tool_name")})
         emit(None)
-    except (urllib.error.URLError, TimeoutError, OSError, json.JSONDecodeError) as exc:
-        log({"error": str(exc), "tool": payload.get("tool_name")})
-        emit(None)
-
-    elapsed_ms = round((time.monotonic() - started) * 1000)
-    answers = result.get("answers", {})
-    scores = {k: v.get("noul", 0.0) for k, v in answers.items()}
 
     log(
         {
+            "hook": "gate",
             "tool": payload.get("tool_name"),
             "cwd": payload.get("cwd"),
             "scores": scores,
             "latency_ms": elapsed_ms,
-            "usage": result.get("usage"),
+            "usage": usage,
             "state_head": state[:300],
         }
     )
-
-    if not scores:
-        emit(None)
 
     # Evaluate each question against its own thresholds, then take the most
     # severe outcome. A single question crossing its deny bar outranks any
     # number of questions that merely want to ask.
     denies, asks = [], []
-    for key, prob in scores.items():
-        deny_at, ask_at = THRESHOLDS.get(key, DEFAULT_THRESHOLD)
-        label = f"{REASONS.get(key, key)} (p={prob:.2f})"
+    for name, prob in scores.items():
+        deny_at, ask_at = THRESHOLDS.get(name, DEFAULT_THRESHOLD)
+        label = f"{REASONS.get(name, name)} (p={prob:.2f})"
         if prob >= deny_at:
             denies.append((prob, label))
         elif prob >= ask_at:

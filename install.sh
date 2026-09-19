@@ -12,13 +12,14 @@ set -euo pipefail
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SETTINGS="$HOME/.claude/settings.json"
 GATE="$REPO/src/jev_gate.py"
+FINISH="$REPO/src/jev_finish.py"
 
 if [[ ! -f "$SETTINGS" ]]; then
   echo "No $SETTINGS found. Start Claude Code once, then re-run." >&2
   exit 1
 fi
 
-chmod +x "$GATE"
+chmod +x "$GATE" "$FINISH"
 cp "$SETTINGS" "$SETTINGS.bak-jevgate"
 
 MODE="install"
@@ -37,40 +38,52 @@ if [[ "$MODE" == "install" && -z "$KEY" ]]; then
   exit 1
 fi
 
-MODE="$MODE" GATE="$GATE" KEY="$KEY" SETTINGS="$SETTINGS" LOG="$HOME/jev-gate.jsonl" \
-python3 - <<'PY'
+MODE="$MODE" GATE="$GATE" FINISH="$FINISH" KEY="$KEY" SETTINGS="$SETTINGS" \
+LOG="$HOME/jev-gate.jsonl" python3 - <<'PY'
 import json, os, pathlib
 
 mode = os.environ["MODE"]
-gate = os.environ["GATE"]
 path = pathlib.Path(os.environ["SETTINGS"])
 
+# (hook event, script, matcher or None)
+WIRING = [
+    ("PreToolUse", os.environ["GATE"], "Bash|Write|Edit|NotebookEdit"),
+    ("Stop", os.environ["FINISH"], None),
+]
+
 data = json.loads(path.read_text())
-hooks = data.setdefault("hooks", {}).setdefault("PreToolUse", [])
+hooks = data.setdefault("hooks", {})
+changed = []
 
+for event, script, matcher in WIRING:
+    entries = hooks.setdefault(event, [])
 
-def owns(entry):
-    return any(h.get("command") == gate for h in entry.get("hooks", []))
+    def owns(entry, script=script):
+        return any(h.get("command") == script for h in entry.get("hooks", []))
 
+    name = pathlib.Path(script).stem
+    if mode == "uninstall":
+        kept = [e for e in entries if not owns(e)]
+        if len(kept) < len(entries):
+            changed.append(f"removed {name} from {event}")
+        hooks[event] = kept
+    elif not any(owns(e) for e in entries):
+        entry = {"hooks": [{"type": "command", "command": script}]}
+        if matcher:
+            entry["matcher"] = matcher
+        entries.append(entry)
+        changed.append(f"added {name} to {event}")
 
+env = data.setdefault("env", {})
 if mode == "uninstall":
-    before = len(hooks)
-    data["hooks"]["PreToolUse"] = [e for e in hooks if not owns(e)]
     for k in ("TYPESAFE_API_KEY", "JEV_GATE_LOG"):
-        data.get("env", {}).pop(k, None)
-    path.write_text(json.dumps(data, indent=2) + "\n")
-    print("removed" if len(data["hooks"]["PreToolUse"]) < before else "was not installed")
+        env.pop(k, None)
 else:
-    if not any(owns(e) for e in hooks):
-        hooks.append({
-            "matcher": "Bash|Write|Edit|NotebookEdit",
-            "hooks": [{"type": "command", "command": gate}],
-        })
-    env = data.setdefault("env", {})
     env["TYPESAFE_API_KEY"] = os.environ["KEY"]
     env.setdefault("JEV_GATE_LOG", os.environ["LOG"])
-    path.write_text(json.dumps(data, indent=2) + "\n")
-    print("installed")
+
+path.write_text(json.dumps(data, indent=2) + "\n")
+print("\n".join(f"  {c}" for c in changed) if changed else "  no change needed")
 PY
 
 echo

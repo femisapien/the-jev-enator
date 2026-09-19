@@ -11,6 +11,7 @@ set -uo pipefail
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SETTINGS="$HOME/.claude/settings.json"
 GATE="$REPO/src/jev_gate.py"
+FINISH="$REPO/src/jev_finish.py"
 PASS=0
 
 ok()   { printf '  \033[32mOK\033[0m    %s\n' "$1"; }
@@ -21,26 +22,29 @@ echo
 echo "jev-gate status"
 echo
 
-# 1. Registered as a hook?
-if python3 -c "
+# 1. Both hooks registered?
+registered() {
+  python3 -c "
 import json,sys,pathlib
 d=json.loads(pathlib.Path('$SETTINGS').read_text())
-h=d.get('hooks',{}).get('PreToolUse',[])
-sys.exit(0 if any(x.get('command')=='$GATE' for e in h for x in e.get('hooks',[])) else 1)
-" 2>/dev/null; then
-  ok "registered in settings.json as a PreToolUse hook"
-else
-  bad "not registered in settings.json"
-  note "run: $REPO/install.sh"
-fi
+h=d.get('hooks',{}).get('$1',[])
+sys.exit(0 if any(x.get('command')=='$2' for e in h for x in e.get('hooks',[])) else 1)
+" 2>/dev/null
+}
 
-# 2. Executable?
-if [[ -x "$GATE" ]]; then
-  ok "hook script is executable"
-else
-  bad "hook script is not executable"
-  note "run: chmod +x $GATE"
-fi
+for spec in "PreToolUse:$GATE:danger gate" "Stop:$FINISH:completion check"; do
+  IFS=':' read -r event script label <<<"$spec"
+  if registered "$event" "$script"; then
+    ok "$label registered as a $event hook"
+  else
+    bad "$label not registered in settings.json"
+    note "run: $REPO/install.sh"
+  fi
+  if [[ ! -x "$script" ]]; then
+    bad "$label script is not executable"
+    note "run: chmod +x $script"
+  fi
+done
 
 # 3. Key reachable by the hook process?
 KEY="$(python3 -c "
@@ -70,6 +74,39 @@ except Exception: print('none')
     bad "live API call did not block 'rm -rf /' (got: $DECISION)"
     note "gate is failing open — set JEV_GATE_LOG and check the error"
   fi
+
+  # 4b. Live round trip through the Stop hook with a turn that claims success
+  # without verifying. Must block.
+  TMP="$(mktemp -t jevverify).jsonl"
+  python3 - "$TMP" <<'PY'
+import json, sys
+rows = [
+    {"type": "user", "message": {"role": "user", "content": "Fix the failing test in src/utils."}},
+    {"type": "assistant", "message": {"role": "assistant", "content": [
+        {"type": "tool_use", "id": "t1", "name": "Edit",
+         "input": {"file_path": "src/utils/date.ts", "new_string": "return d.toLocaleDateString()"}}]}},
+    {"type": "user", "message": {"role": "user", "content": [
+        {"type": "tool_result", "tool_use_id": "t1", "content": "Edit applied", "is_error": False}]}},
+    {"type": "assistant", "message": {"role": "assistant", "content": [
+        {"type": "text", "text": "Fixed. The tests should pass now."}]}},
+]
+with open(sys.argv[1], "w") as fh:
+    for r in rows:
+        fh.write(json.dumps(r) + "\n")
+PY
+  SOUT="$(echo '{"hook_event_name":"Stop","transcript_path":"'"$TMP"'","cwd":"'"$HOME"'","stop_hook_active":false}' \
+    | TYPESAFE_API_KEY="$KEY" python3 "$FINISH" 2>&1)"
+  rm -f "$TMP"
+  if echo "$SOUT" | python3 -c "
+import json,sys
+try: sys.exit(0 if json.load(sys.stdin).get('decision')=='block' else 1)
+except Exception: sys.exit(1)
+" 2>/dev/null; then
+    ok "live API call blocked an unverified completion claim"
+  else
+    bad "completion check did not block an unverified claim"
+    note "failing open — set JEV_GATE_LOG and check the error"
+  fi
 fi
 
 # 5. Disabled by env?
@@ -87,17 +124,39 @@ echo
 if [[ -n "$LOG" && -f "$LOG" ]]; then
   python3 - "$LOG" <<'PY'
 import json, sys
-rows = [json.loads(l) for l in open(sys.argv[1]) if l.strip()]
-scored = [r for r in rows if "scores" in r]
+
+rows = []
+for line in open(sys.argv[1]):
+    line = line.strip()
+    if not line:
+        continue
+    try:
+        rows.append(json.loads(line))
+    except json.JSONDecodeError:
+        continue
+
 errs = [r for r in rows if "error" in r]
-print(f"  {len(scored)} classifications logged, {len(errs)} errors")
-if scored:
+total_toks = 0
+
+for hook, label in (("gate", "danger gate"), ("finish", "completion check")):
+    scored = [r for r in rows if r.get("hook") == hook and "scores" in r]
+    if not scored:
+        print(f"  {label:18} no activity yet")
+        continue
     lat = sorted(r["latency_ms"] for r in scored)
     toks = sum(r.get("usage", {}).get("input_tokens", 0) for r in scored)
-    print(f"  median {lat[len(lat)//2]}ms, {toks} input tokens total, "
-          f"~${toks / 1e6 * 0.042:.4f} spent")
+    total_toks += toks
+    print(f"  {label:18} {len(scored):4} calls, median {lat[len(lat)//2]}ms")
+
+# Pre-refactor lines have no 'hook' key; count their tokens so cost is accurate.
+total_toks += sum(
+    r.get("usage", {}).get("input_tokens", 0)
+    for r in rows
+    if "scores" in r and "hook" not in r
+)
+print(f"  {'total spend':18} ~${total_toks / 1e6 * 0.042:.4f}  ({total_toks} input tokens)")
 if errs:
-    print(f"  last error: {errs[-1].get('error')}")
+    print(f"  {'last error':18} {str(errs[-1].get('error'))[:80]}")
 PY
 else
   echo "  no audit log yet (set JEV_GATE_LOG to record one)"

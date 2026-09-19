@@ -24,7 +24,8 @@ import tempfile
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 HOOK = os.path.join(REPO, "src", "jev_finish.py")
-CWD = "/Users/Jake.Reardon@MLSE.com/media-clips-web"
+# Stand-in for a real project directory. Override with JEV_TEST_CWD.
+CWD = os.environ.get("JEV_TEST_CWD", os.path.join(os.path.expanduser("~"), "some-project"))
 
 
 def user(text):

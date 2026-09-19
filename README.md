@@ -25,28 +25,53 @@ decide from your own data whether to enforce it. See
 The danger gate has the easier job and enforces immediately: `rm -rf` is
 destructive in every context, no intent required.
 
+### Maturity
+
+Honest status, so you can decide whether to trust it:
+
+- **Danger gate** — works. 10/10 fixtures, ~350ms, one real-world false positive
+  found and fixed so far (`--force-with-lease`). Tuned against a few hundred
+  classifications, nearly all from one developer's machine. Expect to hit a false
+  positive specific to your stack and to fix it in about five minutes.
+- **Completion check** — unproven, which is why it ships log-only. Its fixtures
+  were written by the same author as the questions they test, so they demonstrate
+  the plumbing and nothing about real-world accuracy.
+
+Neither has been validated across a team yet. If you're the second person to run
+this, read [Tune it on yourself first](#tune-it-on-yourself-first).
+
 ---
 
 ## 1. Install
+
+Requires Python 3.10+ and an existing Claude Code install. No dependencies.
 
 ```bash
 git clone <repo-url> ~/jev-gate
 cd ~/jev-gate
 cp .env.example .env          # paste your TYPESAFE_API_KEY
 ./install.sh
+./verify.sh                   # should print 6 OKs
 ```
 
 Then **restart Claude Code** — `settings.json` is only read at startup.
 
-`install.sh` appends to the `PreToolUse` array without touching existing hooks,
-backs up `settings.json` to `settings.json.bak-jevgate`, and is safe to run
-twice. Get a key at [typesafe.ai](https://typesafe.ai).
+Get a key at [typesafe.ai](https://typesafe.ai). Pricing is $0.042 per million
+input tokens, output free.
+
+`install.sh` appends to the `PreToolUse` and `Stop` arrays without touching hooks
+you already have, backs up `settings.json` to `settings.json.bak-jevgate`, and is
+safe to run twice. It can live anywhere — paths are resolved relative to the
+script, so `~/jev-gate` is a suggestion, not a requirement.
 
 To remove it:
 
 ```bash
 ./install.sh --uninstall
 ```
+
+That unregisters both hooks and removes the key and log path it added. Your
+original `settings.json` is at `~/.claude/settings.json.bak-jevgate`.
 
 ## 2. Using it
 
@@ -109,27 +134,29 @@ when you don't want to spend the tokens.
 ./verify.sh
 ```
 
-Five checks plus live usage stats:
+Six checks plus live usage stats:
 
 ```
   OK    danger gate registered as a PreToolUse hook
   OK    completion check registered as a Stop hook
   OK    TYPESAFE_API_KEY present in settings.json env
   OK    live API call blocked a destructive command
-  OK    live API call blocked an unverified completion claim
+  OK    completion check correctly flagged an unverified claim
+  OK    completion check is log-only (records verdicts, blocks nothing)
 
-  danger gate          50 calls, median 362ms
-  completion check      1 calls, median 439ms
-  total spend        ~$0.0023  (53675 input tokens)
+  danger gate         296 calls, median 357ms
+  completion check     83 calls, median 361ms
+  total spend        ~$0.0173  (412359 input tokens)
+  errors             9 historical, none recent
 
   Gate is on and working.
 ```
 
-The last two checks matter most: they push a real `rm -rf /` payload and a real
-"tests should pass now" transcript through the real hooks, and fail if either
-isn't blocked. Registration alone proves nothing, because **both hooks fail
-open** — if the API is down, the key is wrong, or TLS breaks, they emit no
-decision and Claude Code behaves exactly as if they weren't installed.
+The two live-API checks matter most: they push a real `rm -rf /` payload and a
+real "tests should pass now" transcript through the real hooks and fail if either
+isn't caught. Registration alone proves nothing, because **both hooks fail open**
+— if the API is down, the key is wrong, or TLS breaks, they emit no decision and
+Claude Code behaves exactly as if they weren't installed.
 
 That's deliberate: a hook that blocks your work when a third-party API hiccups
 gets uninstalled within a day. But it means silent failure is possible, and
@@ -144,22 +171,29 @@ For what it has actually been doing:
 ```
   DANGER GATE  (PreToolUse)
 
-  68 tool calls classified
+  297 tool calls classified
 
-    blocked                  4    5.9%  #.......................
-    asked to confirm         2    2.9%  #.......................
-    passed silently         62   91.2%  ######################..
+    blocked                 36   12.1%  ###.....................
+    asked to confirm        11    3.7%  #.......................
+    passed silently        250   84.2%  ####################....
 
   Why calls were flagged:
-    exfiltrates_secrets      3
-    outside_workspace        3
-    destructive              2
+    destructive              19
+    outside_workspace        14
+    discards_local_work      14
+    exfiltrates_secrets      9
+    rewrites_history         8
 
-  median 362ms, p95 445ms
+  median 357ms, p95 425ms
 ```
 
 The most useful number is **passed silently**. If that isn't well above 90%, the
 gate is too chatty for the work you do and the thresholds need raising.
+
+The 84.2% above is not a real-world rate: 6 of the 10 fixtures in
+`tests/test_jev_gate.py` are dangerous by construction, and repeated test runs
+dominate this log. Judge your own number from a log you built by working, not by
+running the suite.
 
 Raw log if you want it: `tail -f ~/jev-gate.jsonl | jq -c '{hook, scores}'`.
 
@@ -178,16 +212,21 @@ So it gathers evidence instead. Use Claude Code normally for a week, then:
 ```
   COMPLETION CHECK  (Stop)
 
-  13 turns judged  [log-only]
+  53 turns judged  [log-only]
 
-    looked complete              2   15.4%  ####....................
-    WOULD have blocked           3   23.1%  ######..................
-    waiting on you (vetoed)      3   23.1%  ######..................
+    looked complete             15   28.3%  #######.................
+    WOULD have blocked           8   15.1%  ####....................
+    waiting on you (vetoed)     11   20.8%  #####...................
 
   Reasons:
-    left_work_undone           4
-    claimed_without_verifying  2
+    claimed_without_verifying  13
+    left_work_undone            8
+    left_placeholder_code       6
+    ignored_failure             3
 ```
+
+(A `[mixed]` mode label means some rows were logged while enforcing — usually
+from running the fixture suite, which forces `JEV_FINISH_ENFORCE=1`.)
 
 Then read the individual calls and judge them yourself:
 
@@ -231,42 +270,58 @@ team, prefer a shared org key you can rotate over personal keys, and treat
 the policy. Changing them in the repo and having people pull is the whole update
 mechanism — no redeploy, no restart beyond Claude Code itself.
 
-A reasonable rollout: install it yourself for a week, review your own audit log,
-adjust thresholds to your team's actual workflow, then share. Shipping untuned
-thresholds is how you get people running `--uninstall` on day two.
+### Tune it on yourself first
 
-### Does this save MLSE money?
+Run it alone for a week before sharing. Every false positive is a five-minute
+fix — read the score in the log, sharpen the question's `criteria`, add a fixture
+— and each one you catch is one your colleagues don't hit.
 
-**On API spend, no — it adds a little.** Be clear about this if you pitch it.
-Each check is ~800–950 input tokens at $0.042/Mtok:
+That matters more than it sounds. The first time the gate blocks something
+legitimate, most people won't debug it. They'll uninstall it and tell a colleague
+it was annoying. You get one first impression.
+
+A worked example, from the first real false positive this repo hit:
+
+> `git push --force-with-lease origin rebased:spike/experiment` was denied at
+> p=0.91. The criteria said "force push" was dangerous, full stop — which taught
+> the classifier the command's *shape* instead of the actual harm.
+> `--force-with-lease` aborts rather than overwriting commits it hasn't seen, so
+> it can't destroy anyone's work, and it's the normal way to push after a rebase.
+>
+> The fix was to reframe the question around the harm — "would this destroy
+> commits another developer could lose work from?" — and name the safe form
+> explicitly as a false case. Same command now scores 0.07. Plain
+> `push --force origin develop` still denies at 0.93.
+
+Check readiness with `./report.sh`: **passed silently** should be well above 95%
+for the work you actually do. If it isn't, the gate is too chatty to share.
+
+### What does it cost?
+
+**It adds a little to API spend. It is not a cost reduction.** Be straight about
+that if you're pitching it internally. Each check is ~800–950 input tokens at
+$0.042/Mtok:
 
 | Volume | Added cost |
 | --- | --- |
 | 1,000 checks | $0.035 |
 | 10 devs × 500 tool calls + 100 turns/day × 20 days | ~$4/month |
 
-Effectively free, but it is a cost, not a saving.
+For reference, developing this whole repo — ~380 classifications across heavy
+testing — cost about **1.7 cents**.
 
-**Where it does pay back is time.** Two different cases:
+**The payback is time, not tokens.** The danger gate is insurance: one force-push
+over a colleague's work, one `DROP TABLE` against a live database, one `.env`
+posted to an external host. Each costs hours, and the last one costs a credential
+rotation and possibly a security review. At ~$4/month for a team, it pays for
+itself preventing roughly one such event per decade.
 
-The danger gate is insurance against an incident. One force-push over a
-colleague's work, one `DROP TABLE` against a live database, one `.env` posted to
-an external host — each costs hours, and the last one costs a credential rotation
-and possibly a security review.
+The audit log is a second, quieter argument: a per-call record of what agents
+across the team were about to do. Most teams running coding agents have no such
+record at all.
 
-The completion check pays back every day, which is the better argument. The
-common failure mode with coding agents isn't destruction, it's an agent that says
-"done, tests should pass" when it never ran them. You find out ten minutes later
-and spend another turn on it. Catching that before the turn ends saves a
-round trip each time, and those add up faster than any incident.
-
-The honest framing for a manager: **cheap insurance, a daily time saver, and an
-audit trail — not a reduction in model spend.** The audit log is its own
-argument: a per-call record of what agents across the team were about to do, and
-how often they tried to stop early.
-
-**Where Jev genuinely would cut spend** is model routing: classify the task, send
-easy ones to Haiku instead of Opus. That's a real reduction, but hooks can't
+**Where Jev genuinely would cut spend** is model routing — classify the task and
+send easy ones to a cheaper model. That's a real reduction, but hooks can't
 change Claude Code's model mid-session, so it needs a standalone agent. Separate
 project.
 
@@ -323,7 +378,7 @@ Edit the thresholds or `QUESTIONS` criteria, then run the matching fixtures:
 
 ```bash
 source .env
-python3 tests/test_jev_gate.py     # 9 cases: 3 safe, 6 dangerous
+python3 tests/test_jev_gate.py     # 10 cases: 4 safe, 6 dangerous
 python3 tests/test_jev_finish.py   # 10 cases: 5 legitimate, 5 early stops
 ```
 
@@ -371,7 +426,7 @@ and fix `.env`.
 src/jev_client.py        shared Jev client: TLS, timeouts, logging, fail-open
 src/jev_gate.py          PreToolUse  — danger gate (enforcing)
 src/jev_finish.py        Stop        — completion check (log-only)
-tests/test_jev_gate.py   9 fixture payloads, 3 safe and 6 dangerous
+tests/test_jev_gate.py   10 fixture payloads, 4 safe and 6 dangerous
 tests/test_jev_finish.py 10 synthetic transcripts, 5 legitimate and 5 early stops
 install.sh               wire into / out of settings.json
 verify.sh                prove both hooks are on and working

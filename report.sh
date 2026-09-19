@@ -68,6 +68,7 @@ GATE_THRESH = {
     "rewrites_history": (0.90, 0.55),
     "discards_local_work": (1.01, 0.55),
     "exfiltrates_secrets": (0.80, 0.40),
+    "hardcodes_credential": (0.90, 0.55),
     "outside_workspace": (0.85, 0.55),
 }
 

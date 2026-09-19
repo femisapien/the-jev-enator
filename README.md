@@ -6,16 +6,24 @@ too slow and too expensive to sit in the hot path.
 
 Two hooks so far:
 
-| Hook | Event | What it does |
-| --- | --- | --- |
-| **danger gate** | `PreToolUse` | Blocks destructive tool calls before they run |
-| **completion check** | `Stop` | Blocks Claude from ending its turn when it isn't actually done |
+| Hook | Event | What it does | Default |
+| --- | --- | --- | --- |
+| **danger gate** | `PreToolUse` | Blocks destructive tool calls before they run | **enforcing** |
+| **completion check** | `Stop` | Judges whether Claude actually finished its turn | **log-only** |
 
 Jev isn't a chat model — it returns calibrated probabilities on typed questions
 instead of generating text. That makes each check ~350ms and ~$0.00004, cheap
 enough to run on every tool call and every turn.
 
-Measured on this machine: **9/9 and 10/10 fixture cases correct, median 350ms.**
+**The completion check does not block anything by default.** It records a verdict
+per turn and gets out of the way. Whether it's accurate enough to act on is an
+open question — it depends on intent that isn't visible in the transcript, which
+is where cheap classification is weakest. So it collects evidence first, and you
+decide from your own data whether to enforce it. See
+[Evaluating the completion check](#evaluating-the-completion-check).
+
+The danger gate has the easier job and enforces immediately: `rm -rf` is
+destructive in every context, no intent required.
 
 ---
 
@@ -59,37 +67,41 @@ network call, so they cost nothing and add no latency.
 
 ### The completion check
 
-When Claude tries to end its turn, the hook reconstructs the turn from the
-transcript — what you asked for, every tool call and its result, and the closing
-message — and asks whether the work was actually done or just declared done.
-If so, the stop is blocked and Claude is sent back to finish.
+Runs when Claude ends a turn. Reconstructs the turn from the transcript — what
+you asked for, every tool call and its result, and the closing message — and
+judges whether the work was actually done or just declared done.
 
-Four ways to fail, each blocking at p≥0.80:
+**In the default log-only mode it writes one line to the audit log and lets the
+turn end.** You won't notice it. Four things it looks for:
 
-| Caught | Example |
+| Flagged | Example |
 | --- | --- |
 | Claimed without verifying | "Fixed, tests should pass now" — but no test ever ran |
 | Left work undone | You named three files, it edited one and said "done" |
 | Left placeholder code | New `TODO`s or `throw new Error('Not implemented')` you didn't ask for |
 | Ignored a failure | A test failed and the closing message never mentions it |
 
-It deliberately does **not** block when Claude is legitimately stuck. A separate
-`awaiting_user_input` question acts as a veto: if Claude is asking you a
-question, presenting options, or reporting a blocker it can't resolve, the turn
-ends normally. Without that veto the hook would trap you in a loop with an agent
-that can't proceed and isn't allowed to stop and ask.
+A fifth question, `awaiting_user_input`, **vetoes** all of the above at p≥0.55.
+If Claude is asking you a question, presenting options, or reporting a blocker it
+can't resolve, the verdict is "waiting on you" and nothing is flagged. Without
+that veto, enforcing would trap you in a loop with an agent that can't proceed
+and isn't allowed to stop and ask.
 
-It also honours `stop_hook_active`, so it can only ever block once per turn.
+It also honours `stop_hook_active`, so even when enforcing it can only block once
+per turn.
 
 ### Turning things off
 
 ```bash
-export JEV_FINISH_OFF=1       # completion check off, danger gate stays on
+export JEV_FINISH_OFF=1       # completion check off entirely, gate stays on
 export JEV_GATE_DISABLE=1     # both hooks off for this shell
 ./install.sh --uninstall      # both off for good
 ```
 
 Or set either in the `env` block of `settings.json` to make it persistent.
+
+Since the completion check is log-only by default, `JEV_FINISH_OFF` is mostly for
+when you don't want to spend the tokens.
 
 ## 3. Knowing it's on
 
@@ -123,15 +135,85 @@ That's deliberate: a hook that blocks your work when a third-party API hiccups
 gets uninstalled within a day. But it means silent failure is possible, and
 `verify.sh` is how you rule it out.
 
-For ongoing visibility, watch the audit log in a second pane:
+For what it has actually been doing:
 
 ```bash
-tail -f ~/jev-gate.jsonl | jq -c '{tool, scores, latency_ms}'
+./report.sh
 ```
 
-Every classification writes one JSONL line with all five probabilities, latency,
-and token usage. This is also your threshold-tuning data — after a week of real
-traffic you'll see which questions are too jumpy.
+```
+  DANGER GATE  (PreToolUse)
+
+  68 tool calls classified
+
+    blocked                  4    5.9%  #.......................
+    asked to confirm         2    2.9%  #.......................
+    passed silently         62   91.2%  ######################..
+
+  Why calls were flagged:
+    exfiltrates_secrets      3
+    outside_workspace        3
+    destructive              2
+
+  median 362ms, p95 445ms
+```
+
+The most useful number is **passed silently**. If that isn't well above 90%, the
+gate is too chatty for the work you do and the thresholds need raising.
+
+Raw log if you want it: `tail -f ~/jev-gate.jsonl | jq -c '{hook, scores}'`.
+
+## Evaluating the completion check
+
+The completion check ships log-only because I can't tell you whether it's
+accurate on real work. Its ten fixtures were written by the same author as the
+questions they test, which proves the wiring works and nothing about accuracy.
+
+So it gathers evidence instead. Use Claude Code normally for a week, then:
+
+```bash
+./report.sh
+```
+
+```
+  COMPLETION CHECK  (Stop)
+
+  13 turns judged  [log-only]
+
+    looked complete              2   15.4%  ####....................
+    WOULD have blocked           3   23.1%  ######..................
+    waiting on you (vetoed)      3   23.1%  ######..................
+
+  Reasons:
+    left_work_undone           4
+    claimed_without_verifying  2
+```
+
+Then read the individual calls and judge them yourself:
+
+```bash
+./report.sh --turns
+```
+
+```
+  would_block  left_work_undone
+    request: Update all three chart components in src/components/Statistics: Bar, Line, and Pie.
+    scores:  waiting=0.03  unverified=0.83  undone=0.93  stubs=0.08  ignored-fail=0.06
+```
+
+For each one, ask: was that flag right? Then:
+
+- **Mostly right** → `JEV_FINISH_ENFORCE=1` is earning its keep. Set it in the
+  `env` block of `settings.json`.
+- **Mostly wrong** → raise the offending threshold in `BLOCK_AT`, or add a
+  `criteria` example for the false case that covers your situation. Re-run
+  `tests/test_jev_finish.py`, then collect another week.
+- **`would_block` is a large share of turns** → it's too sensitive regardless of
+  whether individual calls were defensible. Enforcing at that rate would be
+  miserable.
+
+This is the honest way to find out. Turning enforcement on before you've read
+your own data is how you end up uninstalling it on day two.
 
 ## 4. Sharing with the team
 
@@ -218,10 +300,11 @@ disable the gate, which costs more safety than it buys.
 
 ### Completion check — `src/jev_finish.py`
 
-Thresholds are higher here, because a false block costs the user a whole extra
-turn.
+Thresholds are higher here, because a false block costs the user a whole turn.
+Crossing one of these is a "hit": logged in log-only mode, blocking under
+`JEV_FINISH_ENFORCE=1`.
 
-| Question | blocks at |
+| Question | hit at |
 | --- | --- |
 | `claimed_without_verifying` | 0.85 |
 | `left_work_undone` | 0.85 |
@@ -229,9 +312,10 @@ turn.
 | `ignored_failure` | 0.80 |
 | `awaiting_user_input` | **vetoes** all of the above at 0.55 |
 
-Observed margins on the fixture set are wide: legitimate turns score ≤0.27 on
-every blocking question, real failures score 0.81–0.95. That gap is what makes
-0.80–0.85 safe.
+Margins on the fixture set are wide — legitimate turns score ≤0.27 on every
+blocking question, seeded failures 0.81–0.95 — but those fixtures are synthetic.
+Treat the thresholds as a starting point to validate against your own log, not as
+a calibrated result.
 
 ### Tuning
 
@@ -271,21 +355,27 @@ question definition — check a recent edit to `QUESTIONS`.
 couldn't find a human prompt in the transcript. It allows the stop in that case.
 Expected on `/compact`, resumed sessions, and subagent turns.
 
-**The completion check blocks something legitimate.** Check the scores in the log
-and raise that question's threshold in `BLOCK_AT`, or add a `criteria` example
-for the false case that covers your situation. Use `JEV_FINISH_OFF=1` in the
-meantime — it leaves the danger gate running.
+**The completion check blocks something legitimate.** Only possible if you set
+`JEV_FINISH_ENFORCE=1`. Remove it to go back to log-only, then raise that
+question's threshold in `BLOCK_AT` or add a `criteria` example covering the false
+case.
+
+**`report.sh` shows fewer calls than expected.** Tests and real sessions may be
+writing to different files. `JEV_GATE_LOG` in `.env` must match the one
+`install.sh` wrote into `settings.json`; if they differ, `cat` one onto the other
+and fix `.env`.
 
 ## Layout
 
 ```
 src/jev_client.py        shared Jev client: TLS, timeouts, logging, fail-open
-src/jev_gate.py          PreToolUse  — danger gate
-src/jev_finish.py        Stop        — completion check
+src/jev_gate.py          PreToolUse  — danger gate (enforcing)
+src/jev_finish.py        Stop        — completion check (log-only)
 tests/test_jev_gate.py   9 fixture payloads, 3 safe and 6 dangerous
 tests/test_jev_finish.py 10 synthetic transcripts, 5 legitimate and 5 early stops
 install.sh               wire into / out of settings.json
 verify.sh                prove both hooks are on and working
+report.sh                read the audit log: what fired, and would it have been right
 .env.example             config template
 ```
 
@@ -298,7 +388,19 @@ Standard library only, no dependencies.
 `ask_jev`, emit the event's decision JSON, and add it to `WIRING` in
 `install.sh`. Follow the fail-open contract — on `JevError`, log and allow.
 
-Ideas that fit this pattern, none built yet:
+**The rule these two hooks taught:** use Jev where the answer is contained in the
+state you hand it. "Is this command destructive?" is fully determined by the
+command text, so the danger gate works and enforces on day one. "Did Claude
+finish?" depends on what you meant and what you'd already agreed — not in the
+transcript — so the completion check is shakier and ships log-only.
+
+When a question needs intent the classifier can't see, cheap classification is
+the wrong primitive no matter how fast it is. If you're unsure which kind you
+have, ship it log-only and let the log tell you.
+
+Ideas that fit this pattern, none built yet. The first two are state-contained
+and should behave like the danger gate; the last two need intent and would want
+log-only first:
 
 - **`PostToolUse`** — read Bash output for swallowed errors and failing tests
   that Claude is about to plow past

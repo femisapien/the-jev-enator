@@ -4,15 +4,24 @@
 When Claude tries to end its turn, this reconstructs the turn from the
 transcript -- the user's request, the tools that ran, and the closing message --
 and asks Jev whether the work was really completed or merely declared complete.
-If Jev is confident it wasn't, the stop is blocked and Claude keeps working.
+
+LOG-ONLY BY DEFAULT. It records its judgment and lets the turn end. Nothing is
+blocked unless you explicitly opt in with JEV_FINISH_ENFORCE=1.
+
+That default is deliberate. Whether this check is accurate enough to act on is an
+open question -- it depends on intent that is not visible in the transcript, which
+is exactly where cheap classification is weakest. So: collect a week of real
+judgments, read them with ./report.sh, and only then decide whether enforcing is
+worth the cost of a false block.
 
 Fails open: any error, timeout, or missing key lets the turn end normally.
 
 Env:
-  TYPESAFE_API_KEY   required, else the hook no-ops
-  JEV_GATE_LOG       optional path for a JSONL audit log
-  JEV_GATE_DISABLE   set to 1 to bypass entirely
-  JEV_FINISH_OFF     set to 1 to bypass only this hook
+  TYPESAFE_API_KEY      required, else the hook no-ops
+  JEV_GATE_LOG          path for the JSONL audit log (required to be useful)
+  JEV_FINISH_ENFORCE    set to 1 to actually block; default is log-only
+  JEV_FINISH_OFF        set to 1 to bypass only this hook
+  JEV_GATE_DISABLE      set to 1 to bypass every hook in this repo
 """
 
 import json
@@ -25,8 +34,9 @@ import os
 
 from jev_client import JevError, api_key, ask_jev, disabled, log, read_payload
 
-# Blocking a stop costs the user a whole extra turn, so the bar is higher than
-# the PreToolUse gate's. Only block when Jev is confident.
+# Thresholds at which a question counts as a hit. In log-only mode a hit is just
+# recorded; under JEV_FINISH_ENFORCE=1 it blocks the stop. Higher than the
+# PreToolUse gate's bar because a false block costs the user a whole turn.
 BLOCK_AT = {
     "claimed_without_verifying": 0.85,
     "left_work_undone": 0.85,
@@ -152,6 +162,15 @@ MAX_TOOL_INPUT_CHARS = 400
 def emit_allow() -> None:
     """Let the turn end."""
     sys.exit(0)
+
+
+def request_head(state: str, limit: int = 220) -> str:
+    """Pull the user's request back out of the state, for the audit log."""
+    marker = "## What the user asked for\n"
+    if marker not in state:
+        return ""
+    body = state.split(marker, 1)[1].split("\n##", 1)[0]
+    return " ".join(body.split())[:limit]
 
 
 def emit_block(reason: str) -> None:
@@ -325,32 +344,46 @@ def main() -> None:
         log({"hook": "finish", "error": str(exc)})
         emit_allow()
 
+    enforcing = os.environ.get("JEV_FINISH_ENFORCE") == "1"
+    waiting = scores.get("awaiting_user_input", 0.0)
+    vetoed = waiting >= VETO_AT
+
+    hits = sorted(
+        (
+            (prob, name)
+            for name, prob in scores.items()
+            if name in BLOCK_AT and prob >= BLOCK_AT[name]
+        ),
+        reverse=True,
+    )
+
+    if vetoed:
+        verdict = "veto_awaiting_user"
+    elif hits:
+        verdict = "would_block" if not enforcing else "blocked"
+    else:
+        verdict = "complete"
+
+    # One record per turn, carrying enough to judge the call later: the verdict,
+    # every probability, and the request itself. report.sh reads this.
     log(
         {
             "hook": "finish",
+            "verdict": verdict,
+            "enforcing": enforcing,
+            "flagged": [name for _, name in hits],
             "cwd": payload.get("cwd"),
             "scores": scores,
             "latency_ms": elapsed_ms,
             "usage": usage,
-            "state_chars": len(state),
+            "request_head": request_head(state),
         }
     )
 
-    waiting = scores.get("awaiting_user_input", 0.0)
-    if waiting >= VETO_AT:
-        log({"hook": "finish", "allowed": f"awaiting_user_input={waiting:.2f}"})
+    if vetoed or not hits or not enforcing:
         emit_allow()
 
-    hits = [
-        (prob, REASONS[name])
-        for name, prob in scores.items()
-        if name in BLOCK_AT and prob >= BLOCK_AT[name]
-    ]
-    if not hits:
-        emit_allow()
-
-    worst = sorted(hits, reverse=True)
-    why = "; ".join(f"{label} (p={prob:.2f})" for prob, label in worst)
+    why = "; ".join(f"{REASONS[name]} (p={prob:.2f})" for prob, name in hits)
     emit_block(
         f"Do not end the turn yet. A completion check flagged: {why}.\n\n"
         "Finish the work: do the parts that were skipped, run the command that "

@@ -94,19 +94,33 @@ with open(sys.argv[1], "w") as fh:
     for r in rows:
         fh.write(json.dumps(r) + "\n")
 PY
+  # Run it with enforcement forced on, purely to prove the API round trip works
+  # and the judgment is correct. The installed default is log-only.
   SOUT="$(echo '{"hook_event_name":"Stop","transcript_path":"'"$TMP"'","cwd":"'"$HOME"'","stop_hook_active":false}' \
-    | TYPESAFE_API_KEY="$KEY" python3 "$FINISH" 2>&1)"
+    | TYPESAFE_API_KEY="$KEY" JEV_FINISH_ENFORCE=1 python3 "$FINISH" 2>&1)"
   rm -f "$TMP"
   if echo "$SOUT" | python3 -c "
 import json,sys
 try: sys.exit(0 if json.load(sys.stdin).get('decision')=='block' else 1)
 except Exception: sys.exit(1)
 " 2>/dev/null; then
-    ok "live API call blocked an unverified completion claim"
+    ok "completion check correctly flagged an unverified claim"
   else
-    bad "completion check did not block an unverified claim"
-    note "failing open — set JEV_GATE_LOG and check the error"
+    bad "completion check failed to flag an unverified claim"
+    note "failing open — check the last error in the audit log"
   fi
+fi
+
+# 5. Which mode is the completion check actually in?
+ENFORCE="$(python3 -c "
+import json,pathlib
+d=json.loads(pathlib.Path('$SETTINGS').read_text())
+print(d.get('env',{}).get('JEV_FINISH_ENFORCE',''))
+" 2>/dev/null)"
+if [[ "$ENFORCE" == "1" || "${JEV_FINISH_ENFORCE:-}" == "1" ]]; then
+  ok "completion check is ENFORCING (it can block turns)"
+else
+  ok "completion check is log-only (records verdicts, blocks nothing)"
 fi
 
 # 5. Disabled by env?
@@ -155,8 +169,16 @@ total_toks += sum(
     if "scores" in r and "hook" not in r
 )
 print(f"  {'total spend':18} ~${total_toks / 1e6 * 0.042:.4f}  ({total_toks} input tokens)")
-if errs:
-    print(f"  {'last error':18} {str(errs[-1].get('error'))[:80]}")
+
+# Only surface errors from the recent tail. An old fixed bug sitting in a long
+# log should not keep reporting itself as if it were current.
+recent = rows[-40:]
+recent_errs = [r for r in recent if "error" in r]
+if recent_errs:
+    print(f"  {'recent errors':18} {len(recent_errs)} of last {len(recent)}: "
+          f"{str(recent_errs[-1].get('error'))[:60]}")
+elif errs:
+    print(f"  {'errors':18} {len(errs)} historical, none recent")
 PY
 else
   echo "  no audit log yet (set JEV_GATE_LOG to record one)"

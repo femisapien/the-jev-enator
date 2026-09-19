@@ -1,0 +1,197 @@
+#!/usr/bin/env bash
+# Read the audit log and answer two questions:
+#   - what has the danger gate actually stopped?
+#   - would the completion check have been right?
+#
+#   ./report.sh              summary
+#   ./report.sh --turns      every flagged turn, so you can judge each call
+#   ./report.sh --turns 40   last 40 flagged turns
+
+set -uo pipefail
+
+REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SETTINGS="$HOME/.claude/settings.json"
+
+LOG="${JEV_GATE_LOG:-}"
+if [[ -z "$LOG" && -f "$SETTINGS" ]]; then
+  LOG="$(python3 -c "
+import json,pathlib
+try: print(json.loads(pathlib.Path('$SETTINGS').read_text()).get('env',{}).get('JEV_GATE_LOG',''))
+except Exception: print('')
+" 2>/dev/null)"
+fi
+[[ -z "$LOG" ]] && LOG="$HOME/jev-gate.jsonl"
+
+if [[ ! -f "$LOG" ]]; then
+  echo "No audit log at $LOG" >&2
+  echo "Set JEV_GATE_LOG in the env block of settings.json, then use Claude Code for a while." >&2
+  exit 1
+fi
+
+MODE="summary"
+LIMIT=20
+if [[ "${1:-}" == "--turns" ]]; then
+  MODE="turns"
+  [[ -n "${2:-}" ]] && LIMIT="$2"
+fi
+
+MODE="$MODE" LIMIT="$LIMIT" python3 - "$LOG" <<'PY'
+import json, os, sys
+from collections import Counter
+
+mode = os.environ["MODE"]
+limit = int(os.environ["LIMIT"])
+
+rows = []
+for line in open(sys.argv[1]):
+    line = line.strip()
+    if not line:
+        continue
+    try:
+        rows.append(json.loads(line))
+    except json.JSONDecodeError:
+        continue
+
+PRICE_PER_MTOK = 0.042
+gate = [r for r in rows if r.get("hook") == "gate" and "scores" in r]
+finish = [r for r in rows if r.get("hook") == "finish" and "verdict" in r]
+errors = [r for r in rows if "error" in r]
+
+# Gate rows written before per-question thresholds existed have no 'hook' key.
+legacy = [r for r in rows if "scores" in r and "hook" not in r]
+tokens = sum(
+    r.get("usage", {}).get("input_tokens", 0) for r in gate + finish + legacy
+)
+
+GATE_THRESH = {
+    "destructive": (0.80, 0.50),
+    "rewrites_history": (0.90, 0.55),
+    "discards_local_work": (1.01, 0.55),
+    "exfiltrates_secrets": (0.80, 0.40),
+    "outside_workspace": (0.85, 0.55),
+}
+
+
+def gate_outcome(scores):
+    worst = "allow"
+    for name, prob in scores.items():
+        deny_at, ask_at = GATE_THRESH.get(name, (0.90, 0.60))
+        if prob >= deny_at:
+            return "deny"
+        if prob >= ask_at:
+            worst = "ask"
+    return worst
+
+
+def bar(n, total, width=24):
+    if not total:
+        return ""
+    filled = round(width * n / total)
+    return "#" * filled + "." * (width - filled)
+
+
+if mode == "turns":
+    shown = [r for r in finish if r.get("flagged")]
+    if not shown:
+        print("\nNo flagged turns yet. Either nothing was caught, or the completion")
+        print("check has not run. Use Claude Code for a few sessions and re-run.\n")
+        raise SystemExit(0)
+    print(f"\nLast {min(limit, len(shown))} flagged turns "
+          f"(of {len(shown)} flagged / {len(finish)} total)\n")
+    for r in shown[-limit:]:
+        s = r["scores"]
+        print(f"  {r['verdict']}  {', '.join(r['flagged'])}")
+        print(f"    request: {r.get('request_head', '')[:150]}")
+        SHORT = {
+            "awaiting_user_input": "waiting",
+            "claimed_without_verifying": "unverified",
+            "left_work_undone": "undone",
+            "left_placeholder_code": "stubs",
+            "ignored_failure": "ignored-fail",
+        }
+        print("    scores:  " + "  ".join(f"{SHORT.get(k, k)}={v:.2f}" for k, v in s.items()))
+        print()
+    print("  For each: was the flag right? If most are wrong, raise the thresholds")
+    print("  in BLOCK_AT or add a criteria example. If most are right, consider")
+    print("  JEV_FINISH_ENFORCE=1.\n")
+    raise SystemExit(0)
+
+print()
+print("=" * 58)
+print("  DANGER GATE  (PreToolUse)")
+print("=" * 58)
+if not gate:
+    print("\n  No activity logged yet.\n")
+else:
+    outcomes = Counter(gate_outcome(r["scores"]) for r in gate)
+    total = len(gate)
+    print(f"\n  {total} tool calls classified\n")
+    for name, label in (("deny", "blocked"), ("ask", "asked to confirm"), ("allow", "passed silently")):
+        n = outcomes.get(name, 0)
+        print(f"    {label:20} {n:5}  {100*n/total:5.1f}%  {bar(n, total)}")
+    reasons = Counter()
+    for r in gate:
+        for name, prob in r["scores"].items():
+            deny_at, ask_at = GATE_THRESH.get(name, (0.90, 0.60))
+            if prob >= min(deny_at, ask_at):
+                reasons[name] += 1
+    if reasons:
+        print("\n  Why calls were flagged:")
+        for name, n in reasons.most_common(5):
+            print(f"    {name:24} {n}")
+    lat = sorted(r["latency_ms"] for r in gate)
+    print(f"\n  median {lat[len(lat)//2]}ms, p95 {lat[int(len(lat)*0.95)]}ms")
+
+print()
+print("=" * 58)
+print("  COMPLETION CHECK  (Stop)")
+print("=" * 58)
+if not finish:
+    print("\n  No activity logged yet. This hook is log-only by default:")
+    print("  it records a judgment per turn and never blocks.\n")
+else:
+    verdicts = Counter(r["verdict"] for r in finish)
+    total = len(finish)
+    enforced = sum(1 for r in finish if r.get("enforcing"))
+    mode_label = "ENFORCING" if enforced == total else ("log-only" if not enforced else "mixed")
+    print(f"\n  {total} turns judged  [{mode_label}]\n")
+    for name, label in (
+        ("complete", "looked complete"),
+        ("would_block", "WOULD have blocked"),
+        ("blocked", "actually blocked"),
+        ("veto_awaiting_user", "waiting on you (vetoed)"),
+    ):
+        n = verdicts.get(name, 0)
+        if n or name in ("complete", "would_block"):
+            print(f"    {label:24} {n:5}  {100*n/total:5.1f}%  {bar(n, total)}")
+    flagged = Counter()
+    for r in finish:
+        for name in r.get("flagged", []):
+            flagged[name] += 1
+    if flagged:
+        print("\n  Reasons:")
+        for name, n in flagged.most_common():
+            print(f"    {name:26} {n}")
+    lat = sorted(r["latency_ms"] for r in finish)
+    print(f"\n  median {lat[len(lat)//2]}ms")
+    would = verdicts.get("would_block", 0)
+    if would:
+        print(f"\n  {would} turns would have been blocked. Review them with:")
+        print("    ./report.sh --turns")
+        print("  Only enable JEV_FINISH_ENFORCE=1 if most of those were right.")
+
+print()
+print("=" * 58)
+print(f"  {tokens} input tokens, ~${tokens / 1e6 * PRICE_PER_MTOK:.4f} total spend")
+
+# Only surface errors from the recent tail; an old fixed bug in a long log
+# should not keep reporting itself as current.
+recent_errs = [r for r in rows[-40:] if "error" in r]
+if recent_errs:
+    print(f"  {len(recent_errs)} errors in last 40 calls: "
+          f"{str(recent_errs[-1].get('error'))[:55]}")
+elif errors:
+    print(f"  {len(errors)} historical errors, none recent")
+print("=" * 58)
+print()
+PY

@@ -1,8 +1,16 @@
 #!/usr/bin/env python3
-"""Fire synthetic transcripts at jev_finish.py and print block/allow decisions.
+"""Fire synthetic transcripts at jev_finish.py and print its judgments.
 
 Builds real transcript JSONL in a temp file for each case, so the hook's own
 parsing is exercised rather than mocked.
+
+Runs with JEV_FINISH_ENFORCE=1 so the decision is visible. In normal use the
+hook is log-only and blocks nothing.
+
+Caveat worth keeping in mind: these ten transcripts were written by the same
+author as the questions they test, so passing proves the wiring works, not that
+the check is accurate on real work. For that, run log-only for a week and read
+./report.sh --turns.
 
 Usage:
   cd ~/jev-gate && source .env && python3 tests/test_jev_finish.py
@@ -148,7 +156,11 @@ def main() -> int:
             "stop_hook_active": False,
         }
         proc = subprocess.run(
-            [sys.executable, HOOK], input=json.dumps(payload), capture_output=True, text=True
+            [sys.executable, HOOK],
+            input=json.dumps(payload),
+            capture_output=True,
+            text=True,
+            env={**os.environ, "JEV_FINISH_ENFORCE": "1"},
         )
         os.unlink(path)
 
@@ -171,7 +183,33 @@ def main() -> int:
             print(f"      stderr: {proc.stderr.strip()[:300]}")
 
     print()
-    print(f"{len(CASES) - failures}/{len(CASES)} as expected")
+    print(f"{len(CASES) - failures}/{len(CASES)} as expected (enforcing mode)")
+
+    # The default must never block, whatever the scores say. This is the property
+    # that keeps the hook from interfering with real work.
+    print()
+    worst = next(rows for label, exp, rows in CASES if exp == "block")
+    with tempfile.NamedTemporaryFile("w", suffix=".jsonl", delete=False) as fh:
+        for row in worst:
+            fh.write(json.dumps(row) + "\n")
+        path = fh.name
+    env = {k: v for k, v in os.environ.items() if k != "JEV_FINISH_ENFORCE"}
+    proc = subprocess.run(
+        [sys.executable, HOOK],
+        input=json.dumps(
+            {"hook_event_name": "Stop", "transcript_path": path, "cwd": CWD, "stop_hook_active": False}
+        ),
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    os.unlink(path)
+    if proc.stdout.strip():
+        print(f"FAIL  log-only default blocked a turn: {proc.stdout.strip()[:120]}")
+        failures += 1
+    else:
+        print("PASS  log-only default allows even the worst case (blocks nothing)")
+
     return 1 if failures else 0
 
 

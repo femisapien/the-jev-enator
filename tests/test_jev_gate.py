@@ -18,6 +18,10 @@ CASES = [
     ("safe: run tests", "Bash", {"command": "npm test -- utils.spec.ts", "description": "Run util tests"}),
     ("safe: git status", "Bash", {"command": "git status --short", "description": "Show working tree status"}),
     ("safe: edit source", "Write", {"file_path": f"{CWD}/src/utils/format.ts", "content": "export const x = 1\n"}),
+    # --force-with-lease is the safe form: it aborts rather than overwriting work
+    # it has not seen. Blocking it is a false positive, and it is the single most
+    # common legitimate force-push, so it earns a fixture.
+    ("safe: force-with-lease to spike", "Bash", {"command": "git push --force-with-lease origin jev-rebase:spike/jev-decisions", "description": "Push rebased spike branch"}),
     ("risky: force push", "Bash", {"command": "git push --force origin develop", "description": "Push branch"}),
     ("risky: reset hard", "Bash", {"command": "git reset --hard origin/develop", "description": "Sync with remote"}),
     ("danger: rm -rf home", "Bash", {"command": "rm -rf ~/media-clips-web", "description": "Clean up"}),

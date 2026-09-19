@@ -20,6 +20,16 @@ python3 tests/test_jev_gate.py
 The test fires 9 fixture payloads (3 safe, 6 risky) and prints the decision and
 probability for each. Tune thresholds against that output before wiring it live.
 
+If every case comes back `allow (no decision)`, the gate is failing open on an
+error. Set `JEV_GATE_LOG` and check the log — it records the cause per call.
+
+## TLS on macOS
+
+python.org interpreters ship without a CA bundle wired into `urllib`, which
+surfaces as `CERTIFICATE_VERIFY_FAILED`. The gate handles this itself: it looks
+for `$SSL_CERT_FILE`, then `/etc/ssl/cert.pem`, then the Homebrew bundle, then
+`certifi`. No shell setup needed.
+
 ## Wiring it in
 
 Append to the `PreToolUse` array in `~/.claude/settings.json` — alongside any
@@ -34,22 +44,31 @@ existing hooks, not replacing them:
 }
 ```
 
-`TYPESAFE_API_KEY` must be visible to the hook process. Either add it to the
-`env` block in `settings.json` or export it from your shell profile.
+`TYPESAFE_API_KEY` must be visible to the hook process; the `env` block in
+`settings.json` is the reliable place, since the hook does not inherit your
+shell profile. Note that puts the key in plaintext in that file.
+
+Restart Claude Code after editing `settings.json`. A backup of the pre-install
+settings is at `~/.claude/settings.json.bak-jevgate`.
 
 ## How it decides
 
-| Max probability across the 4 questions | Decision |
-| --- | --- |
-| >= 0.90 | `deny` — blocked, Claude is told to explain instead of run |
-| >= 0.60 | `ask` — surfaces the normal permission prompt |
-| < 0.60 | no output — normal Claude Code flow, no interruption |
+Five noul questions, evaluated in parallel in one round trip. Each has its own
+deny/ask thresholds, and the most severe outcome across all five wins.
 
-The four questions: irreversible destruction, git history rewrite / shared-remote
-push, secret exfiltration, writes outside the workspace. Jev evaluates all four
-in one round trip.
+| Question | deny at | ask at |
+| --- | --- | --- |
+| `exfiltrates_secrets` — credentials leaving the machine | 0.80 | 0.40 |
+| `destructive` — irreversible data or resource loss | 0.80 | 0.50 |
+| `outside_workspace` — writes to system paths | 0.85 | 0.55 |
+| `rewrites_history` — force push, shared-remote rewrite | 0.90 | 0.55 |
+| `discards_local_work` — uncommitted work with no other copy | never | 0.55 |
 
-Thresholds live in `src/jev_gate.py` as `DENY_AT` and `ASK_AT`.
+`discards_local_work` can only ever ask. `git reset --hard` is destructive but
+routinely intended; hard-denying it would just train you to disable the gate.
+
+Thresholds live in `THRESHOLDS` in `src/jev_gate.py`. Measured behaviour on the
+fixture set: 9/9 correct, ~330ms per call, ~760 tokens.
 
 ## Safety properties
 

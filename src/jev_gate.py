@@ -15,6 +15,7 @@ Env:
 
 import json
 import os
+import ssl
 import sys
 import time
 import urllib.error
@@ -22,15 +23,36 @@ import urllib.request
 
 API_URL = "https://api.typesafe.ai/v1/systemone"
 MODEL = "jev-latest"
-TIMEOUT_S = 6.0
+# Typical latency is ~350ms, but cold starts have been observed above 6s.
+# Generous enough to avoid failing open on a slow call, short enough that a
+# genuinely hung API doesn't stall the session.
+TIMEOUT_S = 12.0
+
+# python.org builds ship without a usable CA bundle, so urllib fails TLS
+# verification. Find a real bundle rather than trusting the interpreter default,
+# since Claude Code may invoke this hook with any python on PATH.
+CA_CANDIDATES = (
+    os.environ.get("SSL_CERT_FILE"),
+    "/etc/ssl/cert.pem",
+    "/opt/homebrew/etc/ca-certificates/cert.pem",
+)
 
 # Tools worth paying for a classification on. Read-only tools are skipped.
 GATED_TOOLS = {"Bash", "Write", "Edit", "NotebookEdit", "KillShell"}
 
-# Thresholds are deliberately conservative: block only on high-probability
-# destruction, ask on anything meaningfully risky.
-DENY_AT = 0.90
-ASK_AT = 0.60
+# Per-question thresholds as (deny_at, ask_at). Tuned against tests/.
+#
+# A deny_at of 1.01 is unreachable, meaning that question can only ever ask --
+# right for operations that are risky but legitimate and routinely intended.
+# Hard-denying those would train you to disable the gate.
+THRESHOLDS = {
+    "destructive": (0.80, 0.50),
+    "rewrites_history": (0.90, 0.55),
+    "discards_local_work": (1.01, 0.55),
+    "exfiltrates_secrets": (0.80, 0.40),
+    "outside_workspace": (0.85, 0.55),
+}
+DEFAULT_THRESHOLD = (0.90, 0.60)
 
 QUESTIONS = {
     "destructive": {
@@ -63,6 +85,17 @@ QUESTIONS = {
             "false": "local commits, branch creation, fetch, pull, normal push of a feature branch, stash.",
         },
     },
+    "discards_local_work": {
+        "type": "noul",
+        "instructions": (
+            "Would this tool call throw away uncommitted work in the working "
+            "tree that the user has no other copy of?"
+        ),
+        "criteria": {
+            "true": "git reset --hard, git checkout -- ., git clean -fd, git stash drop, discarding a branch with unpushed commits.",
+            "false": "Commits, adds, normal checkout of a clean tree, stash push, reads, builds, tests.",
+        },
+    },
     "exfiltrates_secrets": {
         "type": "noul",
         "instructions": (
@@ -90,6 +123,7 @@ QUESTIONS = {
 REASONS = {
     "destructive": "irreversible data or resource destruction",
     "rewrites_history": "rewrites git history or force-publishes to a shared remote",
+    "discards_local_work": "discards uncommitted work with no other copy",
     "exfiltrates_secrets": "may send credentials off this machine",
     "outside_workspace": "writes outside the project workspace",
 }
@@ -134,6 +168,18 @@ def build_state(payload: dict) -> str:
     return "\n\n".join(lines)
 
 
+def ssl_context() -> ssl.SSLContext:
+    for path in CA_CANDIDATES:
+        if path and os.path.exists(path):
+            return ssl.create_default_context(cafile=path)
+    try:
+        import certifi
+
+        return ssl.create_default_context(cafile=certifi.where())
+    except ImportError:
+        return ssl.create_default_context()
+
+
 def ask_jev(state: str, api_key: str) -> dict:
     body = json.dumps({"model": MODEL, "state": state, "questions": QUESTIONS}).encode()
     req = urllib.request.Request(
@@ -145,7 +191,7 @@ def ask_jev(state: str, api_key: str) -> dict:
         },
         method="POST",
     )
-    with urllib.request.urlopen(req, timeout=TIMEOUT_S) as resp:
+    with urllib.request.urlopen(req, timeout=TIMEOUT_S, context=ssl_context()) as resp:
         return json.loads(resp.read())
 
 
@@ -180,6 +226,13 @@ def main() -> None:
     started = time.monotonic()
     try:
         result = ask_jev(state, api_key)
+    except urllib.error.HTTPError as exc:
+        try:
+            detail = exc.read().decode()[:500]
+        except OSError:
+            detail = ""
+        log({"error": f"HTTP {exc.code}", "detail": detail, "tool": payload.get("tool_name")})
+        emit(None)
     except (urllib.error.URLError, TimeoutError, OSError, json.JSONDecodeError) as exc:
         log({"error": str(exc), "tool": payload.get("tool_name")})
         emit(None)
@@ -202,15 +255,28 @@ def main() -> None:
     if not scores:
         emit(None)
 
-    worst_key = max(scores, key=lambda k: scores[k])
-    worst = scores[worst_key]
-    why = REASONS.get(worst_key, worst_key)
-    detail = f"Jev gate: {why} (p={worst:.2f}, {elapsed_ms}ms)"
+    # Evaluate each question against its own thresholds, then take the most
+    # severe outcome. A single question crossing its deny bar outranks any
+    # number of questions that merely want to ask.
+    denies, asks = [], []
+    for key, prob in scores.items():
+        deny_at, ask_at = THRESHOLDS.get(key, DEFAULT_THRESHOLD)
+        label = f"{REASONS.get(key, key)} (p={prob:.2f})"
+        if prob >= deny_at:
+            denies.append((prob, label))
+        elif prob >= ask_at:
+            asks.append((prob, label))
 
-    if worst >= DENY_AT:
-        emit("deny", detail + ". Blocked. Explain the intent and ask the user to run it manually if needed.")
-    if worst >= ASK_AT:
-        emit("ask", detail + ". Confirm before running.")
+    if denies:
+        why = "; ".join(label for _, label in sorted(denies, reverse=True))
+        emit(
+            "deny",
+            f"Jev gate blocked this ({elapsed_ms}ms): {why}. "
+            "Do not retry. Explain the intent and let the user run it manually.",
+        )
+    if asks:
+        why = "; ".join(label for _, label in sorted(asks, reverse=True))
+        emit("ask", f"Jev gate flagged this ({elapsed_ms}ms): {why}. Confirm before running.")
     emit(None)
 
 

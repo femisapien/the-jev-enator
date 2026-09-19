@@ -12,6 +12,7 @@ REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SETTINGS="$HOME/.claude/settings.json"
 GATE="$REPO/src/jev_gate.py"
 FINISH="$REPO/src/jev_finish.py"
+NOTICE="$REPO/src/jev_notice.py"
 PASS=0
 
 ok()   { printf '  \033[32mOK\033[0m    %s\n' "$1"; }
@@ -32,7 +33,7 @@ sys.exit(0 if any(x.get('command')=='$2' for e in h for x in e.get('hooks',[])) 
 " 2>/dev/null
 }
 
-for spec in "PreToolUse:$GATE:danger gate" "Stop:$FINISH:completion check"; do
+for spec in "PreToolUse:$GATE:danger gate" "PostToolUse:$NOTICE:failure notice" "Stop:$FINISH:completion check"; do
   IFS=':' read -r event script label <<<"$spec"
   if registered "$event" "$script"; then
     ok "$label registered as a $event hook"
@@ -73,6 +74,21 @@ except Exception: print('none')
   else
     bad "live API call did not block 'rm -rf /' (got: $DECISION)"
     note "gate is failing open — set JEV_GATE_LOG and check the error"
+  fi
+
+  # 4b. Live round trip through the PostToolUse hook. The output below exits 0
+  # while reporting two failures, which is precisely the case an agent skims.
+  NOUT="$(echo '{"hook_event_name":"PostToolUse","tool_name":"Bash","tool_input":{"command":"npm test 2>&1 | tail -3"},"tool_response":{"stdout":"Time:        4.12 s\nRan all test suites.\nTests: 2 failed, 18 passed, 20 total","stderr":"","exit_code":0}}' \
+    | TYPESAFE_API_KEY="$KEY" python3 "$NOTICE" 2>&1)"
+  if echo "$NOUT" | python3 -c "
+import json,sys
+try: sys.exit(0 if 'failure' in json.load(sys.stdin)['hookSpecificOutput']['additionalContext'] else 1)
+except Exception: sys.exit(1)
+" 2>/dev/null; then
+    ok "failure notice caught a failure hidden behind exit 0"
+  else
+    bad "failure notice missed a failure hidden behind exit 0"
+    note "failing open — check the last error in the audit log"
   fi
 
   # 4b. Live round trip through the Stop hook with a turn that claims success
@@ -152,7 +168,7 @@ for line in open(sys.argv[1]):
 errs = [r for r in rows if "error" in r]
 total_toks = 0
 
-for hook, label in (("gate", "danger gate"), ("finish", "completion check")):
+for hook, label in (("gate", "danger gate"), ("notice", "failure notice"), ("finish", "completion check")):
     scored = [r for r in rows if r.get("hook") == hook and "scores" in r]
     if not scored:
         print(f"  {label:18} no activity yet")

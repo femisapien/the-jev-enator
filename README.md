@@ -4,12 +4,16 @@ Claude Code hooks that use [Jev](https://docs.typesafe.ai) to make cheap,
 calibrated judgement calls in the agent loop — where a full LLM call would be
 too slow and too expensive to sit in the hot path.
 
-Two hooks so far:
+Three hooks so far:
 
 | Hook | Event | What it does | Default |
 | --- | --- | --- | --- |
 | **danger gate** | `PreToolUse` | Blocks destructive tool calls before they run | **enforcing** |
+| **failure notice** | `PostToolUse` | Tells the agent when command output contains a failure | **enforcing** |
 | **completion check** | `Stop` | Judges whether Claude actually finished its turn | **log-only** |
+
+The first two stop bad things. The middle one is the only one that makes the
+agent *better*, and it's the most interesting of the three.
 
 Jev isn't a chat model — it returns calibrated probabilities on typed questions
 instead of generating text. That makes each check ~350ms and ~$0.00004, cheap
@@ -53,11 +57,14 @@ Honest status, so you can decide whether to trust it:
   found and fixed so far (`--force-with-lease`). Tuned against a few hundred
   classifications, nearly all from one developer's machine. Expect to hit a false
   positive specific to your stack and to fix it in about five minutes.
+- **Failure notice** — 13/13 fixtures with a wide margin (clean output ≤0.27,
+  failures ≥0.95). Enforcing, because it only ever injects a sentence; the worst
+  case is a wasted paragraph, not a blocked turn. Untested on real traffic.
 - **Completion check** — unproven, which is why it ships log-only. Its fixtures
   were written by the same author as the questions they test, so they demonstrate
   the plumbing and nothing about real-world accuracy.
 
-Neither has been validated across a team yet. If you're the second person to run
+None of them has been validated across a team yet. If you're the second person to run
 this, read [Tune it on yourself first](#tune-it-on-yourself-first).
 
 ---
@@ -71,7 +78,7 @@ git clone <repo-url> ~/jev-gate
 cd ~/jev-gate
 cp .env.example .env          # paste your TYPESAFE_API_KEY
 ./install.sh
-./verify.sh                   # should print 6 OKs
+./verify.sh                   # should print 8 OKs
 ```
 
 Then **restart Claude Code** — `settings.json` is only read at startup.
@@ -79,7 +86,7 @@ Then **restart Claude Code** — `settings.json` is only read at startup.
 Get a key at [typesafe.ai](https://typesafe.ai). Pricing is $0.042 per million
 input tokens, output free.
 
-`install.sh` appends to the `PreToolUse` and `Stop` arrays without touching hooks
+`install.sh` appends to the `PreToolUse`, `PostToolUse`, and `Stop` arrays without touching hooks
 you already have, backs up `settings.json` to `settings.json.bak-jevgate`, and is
 safe to run twice. It can live anywhere — paths are resolved relative to the
 script, so `~/jev-gate` is a suggestion, not a requirement.
@@ -90,7 +97,7 @@ To remove it:
 ./install.sh --uninstall
 ```
 
-That unregisters both hooks and removes the key and log path it added. Your
+That unregisters all three hooks and removes the key and log path it added. Your
 original `settings.json` is at `~/.claude/settings.json.bak-jevgate`.
 
 ## 2. Using it
@@ -109,6 +116,42 @@ Sits in the path of every write-capable tool call:
 
 Read-only tools (`Read`, `Grep`, `Glob`, `WebFetch`) are skipped before any
 network call, so they cost nothing and add no latency.
+
+### The failure notice
+
+Runs after every Bash call, reads the output, and if it contains a failure, says
+so in the agent's context before the agent gets to interpret it.
+
+This is the hook aimed at making the agent better rather than stopping it doing
+damage. The failure it targets is specific and common:
+
+| Output | What the agent sees | What it does |
+| --- | --- | --- |
+| `Tests: 2 failed, 18 passed` with exit 0 | no red, exit 0 | reports success |
+| `npm test 2>&1 \| tail -3` | the failure detail is gone | reports success |
+| one error under 200 lines of build output | the tail looks clean | reports success |
+
+It doesn't block. It injects a sentence — which is the point. The correction
+lands while there's still time to act, rather than costing you a turn afterwards:
+
+> `[jev-notice, 383ms]` This output contains a failure that is easy to miss on a
+> skim (p=0.96 failure, p=0.62 misleading). The command may have exited 0, or the
+> failure may be truncated or buried. Read the output again before describing this
+> as working, and do not report success unless you can point to the line that
+> shows it.
+
+Two questions, and the second is what earns the stronger wording:
+`output_shows_failure` at ≥0.85 to say anything, `exit_status_misleads` at ≥0.45
+to say it emphatically. A failure stated plainly needs no help; one hidden behind
+exit 0 does.
+
+Quiet on all of: passing tests, clean builds, `npm ci` deprecation noise, lint
+warnings with zero errors, `git status`. Outputs under 40 characters skip the API
+call entirely.
+
+Why this one enforces while the completion check doesn't: injecting a sentence
+has a worst case of one wasted paragraph. Blocking a turn has a worst case of
+trapping you. Different risk, different default.
 
 ### The completion check
 
@@ -138,12 +181,13 @@ per turn.
 ### Turning things off
 
 ```bash
-export JEV_FINISH_OFF=1       # completion check off entirely, gate stays on
-export JEV_GATE_DISABLE=1     # both hooks off for this shell
-./install.sh --uninstall      # both off for good
+export JEV_NOTICE_OFF=1       # failure notice off, others stay on
+export JEV_FINISH_OFF=1       # completion check off, others stay on
+export JEV_GATE_DISABLE=1     # all three off for this shell
+./install.sh --uninstall      # all three off for good
 ```
 
-Or set either in the `env` block of `settings.json` to make it persistent.
+Or set any of them in the `env` block of `settings.json` to make it persistent.
 
 Since the completion check is log-only by default, `JEV_FINISH_OFF` is mostly for
 when you don't want to spend the tokens.
@@ -154,27 +198,30 @@ when you don't want to spend the tokens.
 ./verify.sh
 ```
 
-Six checks plus live usage stats:
+Eight checks plus live usage stats:
 
 ```
   OK    danger gate registered as a PreToolUse hook
+  OK    failure notice registered as a PostToolUse hook
   OK    completion check registered as a Stop hook
   OK    TYPESAFE_API_KEY present in settings.json env
   OK    live API call blocked a destructive command
+  OK    failure notice caught a failure hidden behind exit 0
   OK    completion check correctly flagged an unverified claim
   OK    completion check is log-only (records verdicts, blocks nothing)
 
-  danger gate         296 calls, median 357ms
-  completion check     83 calls, median 361ms
-  total spend        ~$0.0173  (412359 input tokens)
+  danger gate         393 calls, median 357ms
+  failure notice       13 calls, median 350ms
+  completion check     94 calls, median 365ms
+  total spend        ~$0.0230  (547651 input tokens)
   errors             9 historical, none recent
 
   Gate is on and working.
 ```
 
-The two live-API checks matter most: they push a real `rm -rf /` payload and a
-real "tests should pass now" transcript through the real hooks and fail if either
-isn't caught. Registration alone proves nothing, because **both hooks fail open**
+The three live-API checks matter most: they push a real `rm -rf /` payload, a
+`tail -3` output hiding two test failures, and a "tests should pass now"
+transcript through the real hooks, and fail if any isn't caught. Registration alone proves nothing, because **all three fail open**
 — if the API is down, the key is wrong, or TLS breaks, they emit no decision and
 Claude Code behaves exactly as if they weren't installed.
 
@@ -374,6 +421,18 @@ Per-question `(deny, ask)` thresholds; the most severe outcome wins.
 destructive but routinely intended; hard-denying it would train people to
 disable the gate, which costs more safety than it buys.
 
+### Failure notice — `src/jev_notice.py`
+
+| Question | acts at |
+| --- | --- |
+| `output_shows_failure` | 0.85 — inject a plain reminder |
+| `exit_status_misleads` | 0.45 — upgrade to the stronger wording |
+
+Fixture margins are wide: clean output scores ≤0.27 on `output_shows_failure`,
+real failures ≥0.95. Command output is the largest state in this repo, so it
+keeps the first and last 4,000 characters — compile errors live at the head, test
+summaries at the tail, and the middle is usually a file list.
+
 ### Completion check — `src/jev_finish.py`
 
 Thresholds are higher here, because a false block costs the user a whole turn.
@@ -400,6 +459,7 @@ Edit the thresholds or `QUESTIONS` criteria, then run the matching fixtures:
 ```bash
 source .env
 python3 tests/test_jev_gate.py     # 23 cases: 14 safe, 9 dangerous
+python3 tests/test_jev_notice.py   # 13 cases: 6 quiet, 7 failures
 python3 tests/test_jev_finish.py   # 10 cases: 5 legitimate, 5 early stops
 ```
 
@@ -446,11 +506,14 @@ and fix `.env`.
 ```
 src/jev_client.py        shared Jev client: TLS, timeouts, logging, fail-open
 src/jev_gate.py          PreToolUse  — danger gate (enforcing)
+src/jev_notice.py        PostToolUse — failure notice (enforcing, injects text)
 src/jev_finish.py        Stop        — completion check (log-only)
 tests/test_jev_gate.py   23 fixture payloads, 14 safe and 9 dangerous
+tests/test_jev_notice.py 13 command outputs, 6 clean and 7 containing failures
 tests/test_jev_finish.py 10 synthetic transcripts, 5 legitimate and 5 early stops
+tests/spike_posttooluse.py  the spike that proved the notice hook before building it
 install.sh               wire into / out of settings.json
-verify.sh                prove both hooks are on and working
+verify.sh                prove all three hooks are on and working
 report.sh                read the audit log: what fired, and would it have been right
 .env.example             config template
 ```
@@ -464,11 +527,22 @@ Standard library only, no dependencies.
 `ask_jev`, emit the event's decision JSON, and add it to `WIRING` in
 `install.sh`. Follow the fail-open contract — on `JevError`, log and allow.
 
-**The rule these two hooks taught:** use Jev where the answer is contained in the
-state you hand it. "Is this command destructive?" is fully determined by the
-command text, so the danger gate works and enforces on day one. "Did Claude
-finish?" depends on what you meant and what you'd already agreed — not in the
-transcript — so the completion check is shakier and ships log-only.
+**The rule these hooks taught:** use Jev where the answer is contained in the
+state you hand it.
+
+- "Is this command destructive?" — fully determined by the command text. Works,
+  enforces on day one.
+- "Does this output contain a failure?" — fully determined by the output text.
+  Works, 13/13 with a wide margin.
+- "Did Claude finish?" — depends on what you meant and what you'd already agreed,
+  neither of which is in the transcript. Shakier, ships log-only.
+
+The completion check and the failure notice ask nearly the same thing. The
+difference is *where in the loop they ask it*. `Stop` has only the transcript and
+has to infer intent; `PostToolUse` has the actual command output sitting right
+there. Moving the question earlier turned a vague one into a state-contained one.
+If a hook of yours is scoring near 0.5, try moving it earlier before you try
+rewriting the question.
 
 When a question needs intent the classifier can't see, cheap classification is
 the wrong primitive no matter how fast it is. If you're unsure which kind you
@@ -478,8 +552,6 @@ Ideas that fit this pattern, none built yet. The first two are state-contained
 and should behave like the danger gate; the last two need intent and would want
 log-only first:
 
-- **`PostToolUse`** — read Bash output for swallowed errors and failing tests
-  that Claude is about to plow past
 - **`UserPromptSubmit`** — classify the request and auto-inject the matching
   skill, so debugging work pulls in the debugging discipline without you
   remembering to ask

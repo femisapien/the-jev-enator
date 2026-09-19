@@ -55,12 +55,13 @@ for line in open(sys.argv[1]):
 PRICE_PER_MTOK = 0.042
 gate = [r for r in rows if r.get("hook") == "gate" and "scores" in r]
 finish = [r for r in rows if r.get("hook") == "finish" and "verdict" in r]
+notice = [r for r in rows if r.get("hook") == "notice" and "scores" in r]
 errors = [r for r in rows if "error" in r]
 
 # Gate rows written before per-question thresholds existed have no 'hook' key.
 legacy = [r for r in rows if "scores" in r and "hook" not in r]
 tokens = sum(
-    r.get("usage", {}).get("input_tokens", 0) for r in gate + finish + legacy
+    r.get("usage", {}).get("input_tokens", 0) for r in gate + finish + notice + legacy
 )
 
 GATE_THRESH = {
@@ -142,6 +143,32 @@ else:
             print(f"    {name:24} {n}")
     lat = sorted(r["latency_ms"] for r in gate)
     print(f"\n  median {lat[len(lat)//2]}ms, p95 {lat[int(len(lat)*0.95)]}ms")
+
+print()
+print("=" * 58)
+print("  FAILURE NOTICE  (PostToolUse)")
+print("=" * 58)
+if not notice:
+    print("\n  No activity logged yet.\n")
+else:
+    total = len(notice)
+    spoke = [r for r in notice if r.get("noticed")]
+    emph = [r for r in notice if r.get("emphatic")]
+    print(f"\n  {total} command outputs read\n")
+    for label, n in (
+        ("stayed quiet", total - len(spoke)),
+        ("flagged a failure", len(spoke)),
+        ("   of those, easy to miss", len(emph)),
+    ):
+        print(f"    {label:26} {n:5}  {100*n/total:5.1f}%  {bar(n, total)}")
+    if emph:
+        print("\n  Failures an agent would plausibly have skimmed past:")
+        for r in emph[-5:]:
+            print(f"    {r.get('command','')[:70]}")
+    lat = sorted(r["latency_ms"] for r in notice)
+    print(f"\n  median {lat[len(lat)//2]}ms")
+    print("\n  'easy to miss' is the number that justifies this hook. A failure")
+    print("  stated plainly needs no help; one hidden by exit 0 or tail does.")
 
 print()
 print("=" * 58)

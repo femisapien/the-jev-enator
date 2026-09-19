@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# Install jev-gate as a PreToolUse hook in Claude Code.
+# Install the jev-gate hooks into Claude Code.
 #
 #   ./install.sh              install for the current user
 #   ./install.sh --uninstall  remove the hook, leave the repo in place
 #
-# Appends to the PreToolUse array without touching existing hooks, and backs up
+# Appends to each hook array without touching existing hooks, and backs up
 # settings.json first. Safe to run twice.
 
 set -euo pipefail
@@ -13,13 +13,14 @@ REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SETTINGS="$HOME/.claude/settings.json"
 GATE="$REPO/src/jev_gate.py"
 FINISH="$REPO/src/jev_finish.py"
+NOTICE="$REPO/src/jev_notice.py"
 
 if [[ ! -f "$SETTINGS" ]]; then
   echo "No $SETTINGS found. Start Claude Code once, then re-run." >&2
   exit 1
 fi
 
-chmod +x "$GATE" "$FINISH"
+chmod +x "$GATE" "$FINISH" "$NOTICE"
 cp "$SETTINGS" "$SETTINGS.bak-jevgate"
 
 MODE="install"
@@ -38,7 +39,7 @@ if [[ "$MODE" == "install" && -z "$KEY" ]]; then
   exit 1
 fi
 
-MODE="$MODE" GATE="$GATE" FINISH="$FINISH" KEY="$KEY" SETTINGS="$SETTINGS" \
+MODE="$MODE" GATE="$GATE" FINISH="$FINISH" NOTICE="$NOTICE" KEY="$KEY" SETTINGS="$SETTINGS" \
 LOG="$HOME/jev-gate.jsonl" python3 - <<'PY'
 import json, os, pathlib
 
@@ -48,6 +49,7 @@ path = pathlib.Path(os.environ["SETTINGS"])
 # (hook event, script, matcher or None)
 WIRING = [
     ("PreToolUse", os.environ["GATE"], "Bash|Write|Edit|NotebookEdit"),
+    ("PostToolUse", os.environ["NOTICE"], "Bash"),
     ("Stop", os.environ["FINISH"], None),
 ]
 

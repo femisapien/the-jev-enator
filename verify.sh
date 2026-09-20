@@ -20,7 +20,7 @@ bad()  { printf '  \033[31mFAIL\033[0m  %s\n' "$1"; PASS=1; }
 note() { printf '        %s\n' "$1"; }
 
 echo
-echo "jev-gate status"
+echo "The Jev-enator status"
 echo
 
 # 1. Both hooks registered?

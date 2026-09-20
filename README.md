@@ -1,4 +1,4 @@
-# jev-gate
+# The Jev-enator
 
 Claude Code hooks that use [Jev](https://docs.typesafe.ai) to make cheap,
 calibrated judgement calls in the agent loop — where a full LLM call would be
@@ -74,7 +74,7 @@ this, read [Tune it on yourself first](#tune-it-on-yourself-first).
 Requires Python 3.10+ and an existing Claude Code install. No dependencies.
 
 ```bash
-git clone <repo-url> ~/jev-gate
+git clone git@github.com:jakenbear/the-jev-enator.git ~/jev-gate
 cd ~/jev-gate
 cp .env.example .env          # paste your TYPESAFE_API_KEY
 ./install.sh
@@ -460,14 +460,15 @@ Edit the thresholds or `QUESTIONS` criteria, then run the matching fixtures:
 source .env
 python3 tests/test_jev_gate.py     # 23 cases: 14 safe, 9 dangerous
 python3 tests/test_jev_notice.py   # 13 cases: 6 quiet, 7 failures
-python3 tests/test_jev_finish.py   # 10 cases: 5 legitimate, 5 early stops
+python3 tests/test_jev_finish.py   # 12 cases: 7 legitimate, 5 early stops
 ```
 
 `test_jev_finish.py` builds real transcript JSONL in a temp file per case, so the
-hook's own parsing is exercised rather than mocked. Three of its five "allow"
+hook's own parsing is exercised rather than mocked. Five of its seven "allow"
 cases are false-positive guards — waiting on a decision, reporting a blocker,
-explicitly deferring work. Those are the ones that break when you raise
-sensitivity, and the reason to run the suite before changing anything.
+explicitly deferring work, answering a "how do I run it" question, and a turn
+that follows the user's own `!` command. Those are the ones that break when you
+raise sensitivity, and the reason to run the suite before changing anything.
 
 To add a question: add it to `QUESTIONS`, add a human-readable phrase to
 `REASONS`, and add a threshold. Extra questions are nearly free.
@@ -510,7 +511,7 @@ src/jev_notice.py        PostToolUse — failure notice (enforcing, injects text
 src/jev_finish.py        Stop        — completion check (log-only)
 tests/test_jev_gate.py   23 fixture payloads, 14 safe and 9 dangerous
 tests/test_jev_notice.py 13 command outputs, 6 clean and 7 containing failures
-tests/test_jev_finish.py 10 synthetic transcripts, 5 legitimate and 5 early stops
+tests/test_jev_finish.py 12 synthetic transcripts, 7 legitimate and 5 early stops
 tests/spike_posttooluse.py  the spike that proved the notice hook before building it
 install.sh               wire into / out of settings.json
 verify.sh                prove all three hooks are on and working

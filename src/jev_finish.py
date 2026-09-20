@@ -196,6 +196,19 @@ def load_transcript(path: str) -> list[dict]:
     return rows
 
 
+# When the user runs a command themselves with `!`, the harness records it in the
+# transcript as a user-role message wrapped in these tags. It is a local command
+# and its output -- not a request addressed to Claude. Mistaking one for the
+# request is not a small error: the state then carries a wall of command output
+# under "what the user asked for" while the real question is nowhere in it, and
+# the scores describe a turn that never happened.
+LOCAL_COMMAND_TAGS = ("<bash-input>", "<bash-stdout>", "<bash-stderr>")
+
+
+def is_local_command_echo(text: str) -> bool:
+    return text.lstrip().startswith(LOCAL_COMMAND_TAGS)
+
+
 def is_real_user_prompt(row: dict) -> bool:
     """True for a human-typed prompt, not a tool result or injected reminder."""
     if row.get("type") != "user" or row.get("isSidechain"):
@@ -205,10 +218,13 @@ def is_real_user_prompt(row: dict) -> bool:
         return False
     content = message.get("content")
     if isinstance(content, str):
-        return bool(content.strip())
+        return bool(content.strip()) and not is_local_command_echo(content)
     if isinstance(content, list):
         # A tool_result block means this is the harness replying, not the human.
-        return any(b.get("type") in ("text", "image") for b in content if isinstance(b, dict))
+        texts = [b.get("text", "") for b in content if isinstance(b, dict) and b.get("type") == "text"]
+        if any(b.get("type") == "image" for b in content if isinstance(b, dict)):
+            return True
+        return any(t.strip() and not is_local_command_echo(t) for t in texts)
     return False
 
 

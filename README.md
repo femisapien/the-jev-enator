@@ -74,8 +74,8 @@ this, read [Tune it on yourself first](#tune-it-on-yourself-first).
 Requires Python 3.10+ and an existing Claude Code install. No dependencies.
 
 ```bash
-git clone git@github.com:jakenbear/the-jev-enator.git ~/jev-gate
-cd ~/jev-gate
+git clone git@github.com:jakenbear/the-jev-enator.git ~/the-jev-enator
+cd ~/the-jev-enator
 cp .env.example .env          # paste your TYPESAFE_API_KEY
 ./install.sh
 ./verify.sh                   # should print 8 OKs
@@ -89,7 +89,7 @@ input tokens, output free.
 `install.sh` appends to the `PreToolUse`, `PostToolUse`, and `Stop` arrays without touching hooks
 you already have, backs up `settings.json` to `settings.json.bak-jevgate`, and is
 safe to run twice. It can live anywhere — paths are resolved relative to the
-script, so `~/jev-gate` is a suggestion, not a requirement.
+script, so `~/the-jev-enator` is a suggestion, not a requirement.
 
 To remove it:
 

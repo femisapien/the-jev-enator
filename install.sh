@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Install the jev-gate hooks into Claude Code.
+# Install The Jev-enator hooks into Claude Code.
 #
 #   ./install.sh              install for the current user
 #   ./install.sh --uninstall  remove the hook, leave the repo in place

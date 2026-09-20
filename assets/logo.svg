@@ -1,0 +1,130 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256" role="img" aria-label="The Jev-enator: a chrome endoskeleton skull with one glowing red eye">
+  <title>The Jev-enator</title>
+
+  <defs>
+    <!-- Chrome: hard highlight on the left, deep shadow right of centre. -->
+    <linearGradient id="chrome" x1="0" y1="0" x2="1" y2="0.35">
+      <stop offset="0%"   stop-color="#f2f5f7"/>
+      <stop offset="22%"  stop-color="#b9c2c9"/>
+      <stop offset="42%"  stop-color="#7d878f"/>
+      <stop offset="58%"  stop-color="#aeb8c0"/>
+      <stop offset="78%"  stop-color="#5c656d"/>
+      <stop offset="100%" stop-color="#8e979f"/>
+    </linearGradient>
+
+    <linearGradient id="jaw" x1="0" y1="0" x2="1" y2="0.2">
+      <stop offset="0%"   stop-color="#d7dee4"/>
+      <stop offset="35%"  stop-color="#8d969e"/>
+      <stop offset="65%"  stop-color="#b3bcc3"/>
+      <stop offset="100%" stop-color="#5a636b"/>
+    </linearGradient>
+
+    <radialGradient id="socket" cx="0.5" cy="0.45" r="0.6">
+      <stop offset="0%"   stop-color="#05070a"/>
+      <stop offset="70%"  stop-color="#0d1117"/>
+      <stop offset="100%" stop-color="#1c2530" stop-opacity="0"/>
+    </radialGradient>
+
+    <radialGradient id="ember" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0%"   stop-color="#fff4f0"/>
+      <stop offset="18%"  stop-color="#ff6a4a"/>
+      <stop offset="45%"  stop-color="#e01b1b"/>
+      <stop offset="100%" stop-color="#6b0000"/>
+    </radialGradient>
+
+    <filter id="redGlow" x="-120%" y="-120%" width="340%" height="340%">
+      <feGaussianBlur stdDeviation="7" result="b"/>
+      <feMerge>
+        <feMergeNode in="b"/>
+        <feMergeNode in="b"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+  </defs>
+
+  <!-- Terminal-dark plate -->
+  <rect width="256" height="256" rx="52" fill="#0b0e13"/>
+  <rect x="0.75" y="0.75" width="254.5" height="254.5" rx="51.5" fill="none" stroke="#2b333d" stroke-width="1.5"/>
+
+  <g transform="translate(128 122) scale(1.02) translate(-128 -122)">
+
+    <!-- Cranium -->
+    <path fill="url(#chrome)" stroke="#2a3138" stroke-width="2.5" stroke-linejoin="round"
+          d="M128 34
+             c 34 0 58 20 62 50
+             c 2 17 -2 30 -8 39
+             c -5 8 -7 14 -7 22
+             l 0 10
+             c 0 6 -5 10 -12 11
+             l -70 0
+             c -7 -1 -12 -5 -12 -11
+             l 0 -10
+             c 0 -8 -2 -14 -7 -22
+             c -6 -9 -10 -22 -8 -39
+             c 4 -30 28 -50 62 -50 z"/>
+
+    <!-- Centre seam: two-piece casting -->
+    <path d="M128 36 L128 74" stroke="#4d565e" stroke-width="2" stroke-linecap="round" opacity="0.75"/>
+
+    <!-- Brow ridge: a hard shelf, angled down toward the nose. The angle is what
+         makes the face read as hostile rather than blank. -->
+    <path fill="url(#jaw)" stroke="#2f363d" stroke-width="2" stroke-linejoin="round"
+          d="M64 92 l 56 12 l 0 9 l -58 -10 z"/>
+    <path fill="url(#jaw)" stroke="#2f363d" stroke-width="2" stroke-linejoin="round"
+          d="M192 92 l -56 12 l 0 9 l 58 -10 z"/>
+
+    <!-- Eye sockets: angular, deep-set, canted inward -->
+    <path fill="url(#socket)" stroke="#161b22" stroke-width="2.5" stroke-linejoin="round"
+          d="M70 110 l 50 -3 l 0 20 c 0 7 -6 12 -15 13 l -21 0 c -9 -1 -15 -7 -16 -16 z"/>
+    <path fill="url(#socket)" stroke="#161b22" stroke-width="2.5" stroke-linejoin="round"
+          d="M186 110 l -50 -3 l 0 20 c 0 7 6 12 15 13 l 21 0 c 9 -1 15 -7 16 -16 z"/>
+
+    <!-- The eye. One lit, one dark: the machine is looking at exactly one thing. -->
+    <g filter="url(#redGlow)">
+      <circle cx="95" cy="122" r="10" fill="url(#ember)"/>
+    </g>
+    <circle cx="95" cy="122" r="3.2" fill="#fff8f5" opacity="0.95"/>
+    <circle cx="161" cy="122" r="8.5" fill="#0f141a"/>
+    <circle cx="161" cy="122" r="8.5" fill="none" stroke="#39414a" stroke-width="1.5"/>
+    <circle cx="158" cy="119" r="2" fill="#6f7a83" opacity="0.45"/>
+
+    <!-- Nasal cavity: narrow inverted wedge -->
+    <path fill="#0b0f14" stroke="#343c45" stroke-width="2" stroke-linejoin="round"
+          d="M128 128 l 13 30 l -26 0 z"/>
+
+    <!-- Cheek struts -->
+    <path fill="none" stroke="#69727a" stroke-width="2.5" stroke-linecap="round" opacity="0.75"
+          d="M70 138 c 5 14 13 24 23 30 M186 138 c -5 14 -13 24 -23 30"/>
+
+    <!-- Hydraulic pistons either side, hinging the jaw to the cranium -->
+    <g stroke="#454e56" stroke-width="2" fill="url(#jaw)">
+      <rect x="72"  y="160" width="9" height="22" rx="2"/>
+      <rect x="175" y="160" width="9" height="22" rx="2"/>
+    </g>
+
+    <!-- Jaw: wider than the cranium base so it reads as clamped shut -->
+    <path fill="url(#jaw)" stroke="#2a3138" stroke-width="2.5" stroke-linejoin="round"
+          d="M78 174
+             l 100 0
+             c 4 0 7 3 7 7
+             c 0 18 -11 32 -30 38
+             c -8 3 -17 4 -27 4
+             c -10 0 -19 -1 -27 -4
+             c -19 -6 -30 -20 -30 -38
+             c 0 -4 3 -7 7 -7 z"/>
+
+    <!-- Teeth: the grille that reads as a grin -->
+    <g stroke="#3b4349" stroke-width="1.5">
+      <rect x="85"  y="174" width="12" height="16" rx="1.5" fill="#cdd6dd"/>
+      <rect x="99"  y="174" width="12" height="19" rx="1.5" fill="#e8edf1"/>
+      <rect x="113" y="174" width="12" height="21" rx="1.5" fill="#f2f6f8"/>
+      <rect x="127" y="174" width="12" height="21" rx="1.5" fill="#eef2f5"/>
+      <rect x="141" y="174" width="12" height="19" rx="1.5" fill="#dde4ea"/>
+      <rect x="155" y="174" width="12" height="16" rx="1.5" fill="#cdd6dd"/>
+    </g>
+    <path d="M80 172 L176 172" stroke="#5a636b" stroke-width="2.5" stroke-linecap="round" opacity="0.8"/>
+
+    <!-- Chin bolt -->
+    <circle cx="128" cy="212" r="4" fill="#9aa3ab" stroke="#4b545c" stroke-width="1.5"/>
+  </g>
+</svg>

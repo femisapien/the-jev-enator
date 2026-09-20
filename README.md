@@ -1,4 +1,11 @@
-# The Jev-enator
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/logo.svg">
+    <img src="assets/logo-light.svg" alt="The Jev-enator" width="132" height="132">
+  </picture>
+</p>
+
+<h1 align="center">The Jev-enator</h1>
 
 Claude Code hooks that use [Jev](https://docs.typesafe.ai) to make cheap,
 calibrated judgement calls in the agent loop — where a full LLM call would be
@@ -556,6 +563,7 @@ tests/test_jev_finish.py 12 synthetic transcripts, 7 legitimate and 5 early stop
 tests/spike_posttooluse.py  the spike that proved the notice hook before building it
 install.sh               wire into / out of settings.json
 CONTRIBUTING.md          setup, how to report a bad call, threshold rules
+assets/logo.svg          icon, dark background (logo-light.svg for light)
 verify.sh                prove all three hooks are on and working
 report.sh                read the audit log: what fired, and would it have been right
 .env.example             config template

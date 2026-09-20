@@ -1,4 +1,4 @@
-# Contributing
+# 🤝 Contributing
 
 The most useful contribution isn't code. It's a case where a hook got it wrong.
 
@@ -6,7 +6,7 @@ These hooks are calibrated against a few hundred classifications from one
 developer's machine, on one stack. Every false positive you hit on a different
 stack is information nobody here has.
 
-## Setup
+## 📦 Setup
 
 ```bash
 git clone git@github.com:jakenbear/the-jev-enator.git ~/the-jev-enator
@@ -22,7 +22,7 @@ costs well under a cent to run.
 
 Restart Claude Code after installing; `settings.json` is only read at startup.
 
-## Running the tests
+## 🧪 Running the tests
 
 ```bash
 source .env
@@ -39,7 +39,7 @@ Expect **occasional** flakiness. A couple of fixtures sit within 0.02 of their
 threshold, so a rerun can flip them. If a case fails, rerun before debugging. If
 it fails twice, it's real.
 
-## Reporting a bad call
+## 🐛 Reporting a bad call
 
 This is the highest-value issue you can file. Include:
 
@@ -53,7 +53,7 @@ usually obvious from the scores alone.
 Redact freely. The log records command text and paths, so scrub anything
 internal before pasting.
 
-## Changing a threshold or a question
+## 🎛️ Changing a threshold or a question
 
 Two rules, both learned the hard way:
 
@@ -70,10 +70,10 @@ the commit message and explain why.
 
 When a question scores near 0.5 on cases you think are obvious, the question is
 usually asking for something not in the state. See
-[Adding another hook](README.md#adding-another-hook) — moving the question earlier
+[Adding another hook](README.md#-adding-another-hook) — moving the question earlier
 in the loop beats rewording it.
 
-## Adding a hook
+## 🪝 Adding a hook
 
 `src/jev_client.py` holds everything reusable. A new hook is roughly:
 
@@ -89,7 +89,7 @@ in the loop beats rewording it.
 Ship anything that depends on intent as log-only, and let the log decide whether
 it earns enforcement. `report.sh` exists for exactly this.
 
-## Style
+## 🎨 Style
 
 Match what's there. Comments explain *why* a number or a branch exists, not what
 the line does — the thresholds are the interesting part of this codebase and an
@@ -98,7 +98,7 @@ undocumented constant is a magic number.
 No new dependencies. Standard library is a feature here: these run on every tool
 call, in whatever Python is on `PATH`.
 
-## PRs
+## 🚀 PRs
 
 Small and single-purpose. State what you ran, and paste the suite output —
 including any fixture you corrected and why.

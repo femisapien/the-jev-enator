@@ -22,10 +22,15 @@ import sys
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 HOOK = os.path.join(REPO, "src", "jev_notice.py")
 
-# (label, expected, command, exit_code, output)
+sys.path.insert(0, os.path.join(REPO, "src"))
+from jev_notice import KINDS  # noqa: E402  -- assert against the real hint text
+
+# (label, expected, command, exit_code, output[, kind])
 # expected: "quiet"     -> must inject nothing
 #           "notice"    -> must inject something
 #           "emphatic"  -> must inject the stronger easy-to-miss wording
+# kind (optional): substring the recovery hint must contain, or None to require
+#           that no recovery is named. Omit to not check the hint at all.
 CASES = [
     # --- must stay quiet: ordinary success ---
     (
@@ -102,9 +107,17 @@ CASES = [
     ),
 
     # --- the point of the hook: failure present, skim says success ---
+    # Was asserted "emphatic" and scored 0.44-0.46 against EMPHATIC_AT = 0.45 --
+    # it passed or failed on the roll. Expectation corrected rather than the
+    # threshold lowered: this output scores the same as "notice: plain test
+    # failure" below, and the reason is sound. `Tests: 2 failed` is right there
+    # in the summary. Exit 0 disagreeing with the text is what the hook catches,
+    # but nothing here is *hidden*, so a plain notice is the honest verdict.
+    # Dropping EMPHATIC_AT to 0.40 to force this would also make every ordinary
+    # test failure emphatic, which is the wording losing its meaning.
     (
-        "emphatic: exit 0 but tests failed",
-        "emphatic",
+        "notice: exit 0 but tests failed",
+        "notice",
         "npm test",
         0,
         "Test Suites: 1 failed, 2 passed, 3 total\nTests:       2 failed, 18 passed, 20 total\nSnapshots:   0 total\nTime:        4.12 s\nRan all test suites.",
@@ -123,6 +136,61 @@ CASES = [
         0,
         "ERROR in ./src/routes/export.ts\nModule not found: Can't resolve 'aws-sdk'\n\nwebpack compiled with 1 error\nassets by path *.js 1.2 MiB\n  asset main.js 1.2 MiB\n  asset vendor.js 890 KiB\nbuilt at 14:02:11\nwebpack 5.90.0 compiled",
     ),
+
+    # --- failure kind: the notice should name the matching recovery ---
+    # A retry is the cheap correct move here, and the one an agent skips in
+    # favour of "investigating" a rate limit that needs no investigation.
+    (
+        "kind transient: HTTP 429 from an API",
+        "notice",
+        "curl -sS -X POST https://api.stripe.com/v1/customers -u $KEY:",
+        0,
+        '{\n  "error": {\n    "message": "Too many requests. Please retry after a short delay.",\n    "type": "rate_limit_error"\n  }\n}\nHTTP/2 429',
+        "transient",
+    ),
+    (
+        "kind transient: connection reset mid-install",
+        "notice",
+        "npm ci",
+        1,
+        "npm error code ECONNRESET\nnpm error network aborted\nnpm error network This is a problem related to network connectivity.\nnpm error network In most cases you are behind a proxy or have bad network settings.",
+        "transient",
+    ),
+    (
+        "kind dependency: module not installed",
+        "notice",
+        "python3 scripts/usage-report.py",
+        1,
+        'Traceback (most recent call last):\n  File "scripts/usage-report.py", line 3, in <module>\n    import psycopg2\nModuleNotFoundError: No module named \'psycopg2\'',
+        "missing from the environment",
+    ),
+    (
+        "kind dependency: binary not on PATH",
+        "notice",
+        "tsx scripts/usage-report.ts",
+        127,
+        "zsh: command not found: tsx\n\nDid you mean to run this through npx? The repo does not install tsx globally.",
+        "missing from the environment",
+    ),
+    (
+        "kind invocation: unknown flag",
+        "notice",
+        "npm test --coverage-all",
+        1,
+        "npm error Unknown option: '--coverage-all'\nnpm error\nnpm error To see a list of supported npm commands, run:\nnpm error   npm help",
+        "command itself looks wrong",
+    ),
+    # A plain assertion failure fits none of the three kinds. Naming a recovery
+    # here would be worse than silence: it is exactly the case where the agent
+    # does need to read the diff and think.
+    (
+        "kind none: real assertion failure gets no hint",
+        "notice",
+        "npm test -- date.spec.ts",
+        1,
+        "FAIL src/utils/date.spec.ts\n  formats as en-CA\n\n    expected: '2026-01-02'\n    received: '1/2/2026'\n\nTests: 1 failed, 3 passed, 4 total",
+        None,
+    ),
 ]
 
 
@@ -132,7 +200,9 @@ def main() -> int:
         return 1
 
     failures = 0
-    for label, expected, command, code, output in CASES:
+    for case in CASES:
+        label, expected, command, code, output = case[:5]
+        want_kind = case[5] if len(case) > 5 else "unchecked"
         payload = {
             "hook_event_name": "PostToolUse",
             "tool_name": "Bash",
@@ -160,10 +230,18 @@ def main() -> int:
         # An emphatic injection satisfies a plain "notice" expectation: both
         # tell the agent not to claim success, which is the behaviour under test.
         ok = actual == expected or (expected == "notice" and actual == "emphatic")
+
+        kind_note = ""
+        if want_kind is None:
+            if any(h in detail for _, h in KINDS):
+                ok, kind_note = False, "  [named a recovery, expected none]"
+        elif want_kind != "unchecked" and want_kind not in detail:
+            ok, kind_note = False, f"  [no hint matching {want_kind!r}]"
+
         if not ok:
             failures += 1
         mark = "PASS" if ok else "FAIL"
-        print(f"{mark}  {label:42} -> {actual:9} {detail[:58]}")
+        print(f"{mark}  {label:42} -> {actual:9} {detail[:58]}{kind_note}")
         if proc.stderr.strip():
             print(f"      stderr: {proc.stderr.strip()[:300]}")
 

@@ -57,15 +57,22 @@ Honest status, so you can decide whether to trust it:
   found and fixed so far (`--force-with-lease`). Tuned against a few hundred
   classifications, nearly all from one developer's machine. Expect to hit a false
   positive specific to your stack and to fix it in about five minutes.
-- **Failure notice** — 13/13 fixtures with a wide margin (clean output ≤0.27,
-  failures ≥0.95). Enforcing, because it only ever injects a sentence; the worst
-  case is a wasted paragraph, not a blocked turn. Untested on real traffic.
+- **Failure notice** — 19/19 fixtures with a wide margin on the main question
+  (clean output ≤0.27, failures ≥0.95). Enforcing, because it only ever injects a
+  sentence; the worst case is a wasted paragraph, not a blocked turn. The
+  failure-kind hints are newer and unproven on real traffic — 99 logged calls so
+  far contained no transient failures at all, so that path is fixture-tested only.
 - **Completion check** — unproven, which is why it ships log-only. Its fixtures
   were written by the same author as the questions they test, so they demonstrate
   the plumbing and nothing about real-world accuracy.
 
 None of them has been validated across a team yet. If you're the second person to run
 this, read [Tune it on yourself first](#tune-it-on-yourself-first).
+
+**If you hit a bad call, please file it** — a false positive from a stack other
+than mine is the single most useful thing this project can receive. See
+[CONTRIBUTING.md](CONTRIBUTING.md#reporting-a-bad-call); the log line has the
+probabilities, which usually makes the fix obvious.
 
 ---
 
@@ -140,10 +147,31 @@ lands while there's still time to act, rather than costing you a turn afterwards
 > as working, and do not report success unless you can point to the line that
 > shows it.
 
-Two questions, and the second is what earns the stronger wording:
-`output_shows_failure` at ≥0.85 to say anything, `exit_status_misleads` at ≥0.45
-to say it emphatically. A failure stated plainly needs no help; one hidden behind
-exit 0 does.
+Two questions decide whether to speak: `output_shows_failure` at ≥0.85 to say
+anything, `exit_status_misleads` at ≥0.45 to say it emphatically. A failure stated
+plainly needs no help; one hidden behind exit 0 does.
+
+Three more classify the *kind* of failure, and name the matching recovery:
+
+| Kind | Looks like | What gets added |
+| --- | --- | --- |
+| missing dependency | `No module named psycopg2`, `command not found` | install it, don't edit the code that needs it |
+| transient | HTTP 429, `ECONNRESET`, a lock held elsewhere | wait and re-run the same command first |
+| wrong invocation | unknown flag, bad subcommand, mistyped path | fix the command, not the source |
+
+The point is to skip a reasoning call that re-derives what the output already
+said. A 429 wants a retry, not an investigation. All five questions ride in one
+request — Jev bills per input token and the output *is* the state, so five cost
+barely more than two, and the quiet path stays a single ~350ms call.
+
+They're independent probabilities, not a distribution, so a plain assertion
+failure can score low on all three. Then nothing is named — which is correct, as
+that's the case where reading the diff is the actual work.
+
+**A hook can only inject text.** It can suggest the retry; it can't perform it,
+set a backoff, or switch providers. If you want Jev to *execute* the recovery, that
+belongs in an agent you write yourself, where your code owns the `try/except`
+around the call.
 
 Quiet on all of: passing tests, clean builds, `npm ci` deprecation noise, lint
 warnings with zero errors, `git status`. Outputs under 40 characters skip the API
@@ -427,11 +455,24 @@ disable the gate, which costs more safety than it buys.
 | --- | --- |
 | `output_shows_failure` | 0.85 — inject a plain reminder |
 | `exit_status_misleads` | 0.45 — upgrade to the stronger wording |
+| `failure_is_missing_dependency` | 0.60 — name the recovery |
+| `failure_is_transient` | 0.60 — name the recovery |
+| `failure_is_wrong_invocation` | 0.60 — name the recovery |
 
-Fixture margins are wide: clean output scores ≤0.27 on `output_shows_failure`,
-real failures ≥0.95. Command output is the largest state in this repo, so it
-keeps the first and last 4,000 characters — compile errors live at the head, test
-summaries at the tail, and the middle is usually a file list.
+Fixture margins are wide on the first question: clean output scores ≤0.27, real
+failures ≥0.95. `exit_status_misleads` is the tight one — an ordinary visible test
+failure lands at 0.44 against a 0.45 bar, so that fixture is asserted as a plain
+notice, not an emphatic one. Don't lower the threshold to move it; you'd make
+every test failure emphatic and the wording would stop meaning anything.
+
+The three kind questions are checked in the order above and the first over 0.60
+wins, because a missing module often also reads as a bad path. Their bar is lower
+than 0.85 on purpose: a failure is already established by then, so the only
+question is which recovery to name.
+
+Command output is the largest state in this repo, so it keeps the first and last
+4,000 characters — compile errors live at the head, test summaries at the tail,
+and the middle is usually a file list.
 
 ### Completion check — `src/jev_finish.py`
 
@@ -459,7 +500,7 @@ Edit the thresholds or `QUESTIONS` criteria, then run the matching fixtures:
 ```bash
 source .env
 python3 tests/test_jev_gate.py     # 23 cases: 14 safe, 9 dangerous
-python3 tests/test_jev_notice.py   # 13 cases: 6 quiet, 7 failures
+python3 tests/test_jev_notice.py   # 19 cases: 6 quiet, 13 failures
 python3 tests/test_jev_finish.py   # 12 cases: 7 legitimate, 5 early stops
 ```
 
@@ -510,10 +551,11 @@ src/jev_gate.py          PreToolUse  — danger gate (enforcing)
 src/jev_notice.py        PostToolUse — failure notice (enforcing, injects text)
 src/jev_finish.py        Stop        — completion check (log-only)
 tests/test_jev_gate.py   23 fixture payloads, 14 safe and 9 dangerous
-tests/test_jev_notice.py 13 command outputs, 6 clean and 7 containing failures
+tests/test_jev_notice.py 19 command outputs, 6 clean and 13 containing failures
 tests/test_jev_finish.py 12 synthetic transcripts, 7 legitimate and 5 early stops
 tests/spike_posttooluse.py  the spike that proved the notice hook before building it
 install.sh               wire into / out of settings.json
+CONTRIBUTING.md          setup, how to report a bad call, threshold rules
 verify.sh                prove all three hooks are on and working
 report.sh                read the audit log: what fired, and would it have been right
 .env.example             config template
@@ -534,7 +576,7 @@ state you hand it.
 - "Is this command destructive?" — fully determined by the command text. Works,
   enforces on day one.
 - "Does this output contain a failure?" — fully determined by the output text.
-  Works, 13/13 with a wide margin.
+  Works, 19/19 with a wide margin.
 - "Did Claude finish?" — depends on what you meant and what you'd already agreed,
   neither of which is in the transcript. Shakier, ships log-only.
 
@@ -559,3 +601,28 @@ log-only first:
 - **`PostToolUse` on edits** — scope creep: is this edit beyond what was asked?
 - **`PreToolUse` on writes** — repo conventions as probabilities instead of a
   CLAUDE.md file the agent sometimes skims
+
+One that does **not** fit, worth recording because it's tempting: self-healing
+tool calls, where Jev picks `retry | wait | switch_provider | escalate` and your
+code executes it. A hook can't execute anything — its only output is text. The
+failure notice takes the half that does fit (classify the failure, name the
+recovery) and leaves the acting to the agent. The full version belongs in an SDK
+agent where your own code owns the retry loop.
+
+---
+
+## Contributing
+
+Bad calls are the most valuable thing you can send — especially from a stack that
+isn't macOS + Node + Python. See [CONTRIBUTING.md](CONTRIBUTING.md).
+
+Short version: `cp .env.example .env`, `./install.sh`, `./verify.sh`. Run all
+three test suites before a PR. Add a fixture before changing a threshold, and
+check what else sits near that threshold first.
+
+## License
+
+MIT — see [LICENSE](LICENSE).
+
+Jev itself is a third-party service ([typesafe.ai](https://typesafe.ai)) and is
+not covered by this license. You'll need your own API key.

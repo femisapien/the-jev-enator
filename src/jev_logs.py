@@ -307,6 +307,33 @@ DEFAULT_THRESH = (0.90, 0.60)
 PRICE_PER_MTOK = 0.042
 
 
+# Kind labels as they were written before #14, mapped to what they are called now.
+#
+# jev_notice once asked three independent noul questions -- failure_is_transient,
+# failure_is_missing_dependency, failure_is_wrong_invocation -- and 37d859f
+# replaced them with one `choice` whose options dropped the prefix. The hook is
+# right to have moved on; the log cannot. A log is append-only history read on a
+# machine that may be on a different commit than the one that wrote it, so old
+# labels keep arriving forever and counting them as distinct kinds splits the
+# evidence in two. On a real log that read as wrong_invocation 5 and 5 rather
+# than 10, and missing_dependency 15 and 3 rather than 18 -- and those counts are
+# what KIND_MARGIN is tuned from, so it is a wrong threshold, not a cosmetic one.
+#
+# Rename-only, so merging is sound: #14 changed the tiebreak between kinds, not
+# what any one kind means. A future rename that also changes the definition must
+# NOT be added here -- it would pool two different questions under one name.
+KIND_ALIASES = {
+    "failure_is_transient": "transient",
+    "failure_is_missing_dependency": "missing_dependency",
+    "failure_is_wrong_invocation": "wrong_invocation",
+}
+
+
+def canonical_kind(kind):
+    """The current name for a logged failure kind, old or new."""
+    return KIND_ALIASES.get(kind, kind)
+
+
 def gate_outcome(scores: dict) -> str:
     """deny / ask / allow for one gate record."""
     worst = "allow"
@@ -489,7 +516,17 @@ def summarize(rows: list[dict]) -> dict:
                 gate_reasons[name] = gate_reasons.get(name, 0) + 1
 
     spoke = [r for r in notice if r.get("noticed")]
+    # Three buckets, and every noticed record lands in exactly one, because the
+    # kind block is read as a breakdown of the flagged failures. It previously
+    # showed only the first two and described 86 of 154 with no line saying so.
+    #
+    # `unasked` is the pre-#14 records, written before the failure_kind question
+    # existed: no kind and no margin. They are not KIND_MARGIN being too strict
+    # -- nothing was ever asked of them -- so folding them into `unsure` would
+    # make the margin look far worse than it is and invite tuning it on records
+    # it never saw. Told apart by kind_margin's presence, which is the only tell.
     unsure = [r for r in spoke if not r.get("kind") and r.get("kind_margin") is not None]
+    unasked = [r for r in spoke if not r.get("kind") and r.get("kind_margin") is None]
 
     return {
         "records": len(rows),
@@ -513,8 +550,9 @@ def summarize(rows: list[dict]) -> dict:
             "total": len(notice),
             "noticed": len(spoke),
             "emphatic": len([r for r in notice if r.get("emphatic")]),
-            "kinds": _counter(r["kind"] for r in spoke if r.get("kind")),
+            "kinds": _counter(canonical_kind(r["kind"]) for r in spoke if r.get("kind")),
             "kind_unsure": len(unsure),
+            "kind_unasked": len(unasked),
             "kind_near_tie": len([r for r in unsure if r.get("kind_p", 0) >= 0.60]),
             "latency": _latency(notice),
         },

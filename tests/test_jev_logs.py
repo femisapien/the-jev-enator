@@ -548,8 +548,104 @@ def case_synthetic_records_are_excluded():
     ]
 
 
+def case_legacy_kind_labels_are_merged():
+    """Pre-#14 kind names must count as the same kind as their new names.
+
+    Commit 37d859f replaced three noul questions with one choice, renaming
+    `failure_is_wrong_invocation` -> `wrong_invocation` and
+    `failure_is_missing_dependency` -> `missing_dependency`. Records written
+    before that carry the old label, and counting them as separate kinds splits
+    every count in two. Measured on a real log: wrong_invocation read as 5 and 5
+    instead of 10, missing_dependency as 15 and 3 instead of 18 -- and those
+    counts are exactly what KIND_MARGIN gets tuned from, so the split is not
+    cosmetic, it is a threshold decision made from halved evidence.
+    """
+    def spoke(kind):
+        return {"hook": "notice", "scores": {"output_shows_failure": 0.97},
+                "noticed": True, "kind": kind}
+
+    rows = [
+        spoke("failure_is_wrong_invocation"),
+        spoke("wrong_invocation"),
+        spoke("failure_is_missing_dependency"),
+        spoke("missing_dependency"),
+        spoke("failure_is_transient"),
+        spoke("transient"),
+        spoke("needs_code_change"),
+    ]
+    kinds = jev_logs.summarize(rows)["notice"]["kinds"]
+    return [
+        (kinds.get("wrong_invocation") == 2, f"old and new wrong_invocation merged ({kinds})"),
+        (kinds.get("missing_dependency") == 2, "old and new missing_dependency merged"),
+        (kinds.get("transient") == 2, "old and new transient merged"),
+        (
+            not any(k.startswith("failure_is_") for k in kinds),
+            f"no legacy label survives as its own kind ({sorted(kinds)})",
+        ),
+        (kinds.get("needs_code_change") == 1, "the escape hatch is still counted"),
+        (sum(kinds.values()) == 7, f"nothing lost in the merge (got {sum(kinds.values())})"),
+    ]
+
+
+def case_noticed_records_are_fully_accounted():
+    """Every noticed record lands in exactly one bucket of the kind block.
+
+    Records written before the failure_kind question existed carry no `kind` and
+    no `kind_margin`, so counting them as "too close to call" would blame
+    KIND_MARGIN for records it never saw -- and leaving them out entirely, which
+    is what happened, made the kind block silently describe 86 of 154 flagged
+    failures with no line saying where the other 68 went.
+    """
+    base = {"hook": "notice", "scores": {"output_shows_failure": 0.97}, "noticed": True}
+    rows = [
+        {**base, "kind": "transient", "kind_p": 0.88, "kind_margin": 0.51},
+        {**base, "kind": None, "kind_p": 0.49, "kind_margin": 0.07},   # asked, too close
+        {**base, "kind": None, "kind_p": 0.62, "kind_margin": 0.04},   # asked, near-tie
+        base,                                                          # pre-#14: never asked
+        base,
+        {"hook": "notice", "scores": {"output_shows_failure": 0.02}, "noticed": False},
+    ]
+    n = jev_logs.summarize(rows)["notice"]
+    accounted = sum(n["kinds"].values()) + n["kind_unsure"] + n["kind_unasked"]
+    return [
+        (n["noticed"] == 5, f"five noticed records (got {n['noticed']})"),
+        (n["kind_unasked"] == 2, f"pre-#14 records counted separately (got {n['kind_unasked']})"),
+        (n["kind_unsure"] == 2, f"only asked-but-unsure records are unsure (got {n['kind_unsure']})"),
+        (n["kind_near_tie"] == 1, f"near-ties counted within unsure (got {n['kind_near_tie']})"),
+        (accounted == n["noticed"], f"every noticed record is accounted for ({accounted} of {n['noticed']})"),
+    ]
+
+
+def case_gate_reasons_are_not_silently_truncated():
+    """Every question that fired is reported, or the report says how many are hidden.
+
+    report.sh printed the top 5 reasons with no note, so a sixth question that
+    fired -- hardcodes_credential, on a real log -- simply did not exist as far
+    as the reader could tell. The summary must at least carry them all.
+    """
+    def gate(name, prob):
+        return {"hook": "gate", "scores": {name: prob}, "latency_ms": 300}
+
+    rows = [
+        gate("exfiltrates_secrets", 0.95),
+        gate("discards_local_work", 0.90),
+        gate("destructive", 0.90),
+        gate("rewrites_history", 0.95),
+        gate("outside_workspace", 0.90),
+        gate("hardcodes_credential", 0.95),
+    ]
+    reasons = jev_logs.summarize(rows)["gate"]["reasons"]
+    return [
+        (len(reasons) == 6, f"all six firing questions present (got {len(reasons)})"),
+        ("hardcodes_credential" in reasons, "the sixth reason is not dropped"),
+    ]
+
+
 CASES = [
     ("load skips unparseable lines", case_load_skips_garbage),
+    ("legacy kind labels merge with their new names", case_legacy_kind_labels_are_merged),
+    ("every noticed record is accounted for", case_noticed_records_are_fully_accounted),
+    ("gate reasons are all retained", case_gate_reasons_are_not_silently_truncated),
     ("fixture and probe records are excluded", case_synthetic_records_are_excluded),
     ("merging tags sources and drops duplicates", case_merge_tags_and_dedupes),
     ("per-source summaries keep machines distinct", case_by_source_separates_machines),

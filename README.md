@@ -92,13 +92,14 @@ Honest status, so you can decide whether to trust it:
 - **Failure notice** — 20/20 fixtures with a wide margin on the main question
   (clean output ≤0.27, failures ≥0.95). Enforcing, because it only ever injects a
   sentence; the worst case is a wasted paragraph, not a blocked turn. The
-  failure-kind hints are newer and unproven on real traffic — 99 logged calls so
-  far contained no transient failures at all, so that path is fixture-tested only.
-  The kind classifier is a single `choice` question as of #8; the margin threshold
-  that governs when it declines to name a recovery is set from 18 fixture
-  distributions, which is enough to place it in a real gap and not enough to call
-  it calibrated. `./report.sh` prints the kind counts and near-ties to re-check it
-  against your own traffic.
+  failure-kind hints are newer and thinner on real traffic. Of 165 flagged
+  failures logged to date, 68 predate the kind question entirely, 52 answered
+  `needs_code_change` (which names no recovery), 41 named one
+  (`missing_dependency` 20, `transient` 11, `wrong_invocation` 10), and 4 were too
+  close to call. So the margin threshold has been exercised by 97 real calls on
+  top of the 18 fixture distributions it was set from — enough to place it in a
+  real gap, not enough to call it calibrated. `./report.sh` prints that breakdown
+  against your own traffic; the counts here move as the log grows.
 - **Completion check** — unproven, which is why it ships log-only. Its fixtures
   were written by the same author as the questions they test, so they demonstrate
   the plumbing and nothing about real-world accuracy.
@@ -767,7 +768,7 @@ separately, and the log records both halves:
 
     looked in scope                            3   42.9%  ##########..............
     would have been flagged                    4   57.1%  ##############..........
-       of those, explained by earlier turns     1   14.3%  ###.....................
+       of those, explained by earlier turns     1   25.0%  ######..................
 
   25% of flags were already explained by an earlier turn.
 ```

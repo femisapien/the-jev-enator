@@ -126,8 +126,9 @@ cd apps/daemon && RDS_HOST=… python -m pytest                 ×1
 ```
 
 Where it can tell, it also names the fix — needs a code change, missing
-dependency, transient, wrong invocation. On 69 of the 122 it couldn't tell
-confidently and said nothing rather than guess.
+dependency, transient, wrong invocation. Of the 122, **68 predate the kind
+question** and were never asked at all; of the 54 that were asked, 52 got an
+answer and 2 were too close to call, so it said nothing rather than guess.
 
 ---
 

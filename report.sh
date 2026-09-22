@@ -221,8 +221,16 @@ def render(s, heading=None):
             print(f"    {label:20} {n:5}  {100*n/total:5.1f}%  {bar(n, total)}")
         if g["reasons"]:
             print("\n  Why calls were flagged:")
-            for name, n in list(g["reasons"].items())[:5]:
+            reasons = list(g["reasons"].items())
+            for name, n in reasons[:5]:
                 print(f"    {name:24} {n}")
+            # Named, not dropped. A sixth question that fired -- hardcodes_credential
+            # on a real log -- read as "never fires" to anyone tuning it, which is
+            # the opposite of what a truncated list should cost.
+            if len(reasons) > 5:
+                rest = reasons[5:]
+                print(f"    {'(' + str(len(rest)) + ' more)':24} "
+                      + ", ".join(f"{name} {n}" for name, n in rest))
         print(f"\n  median {g['latency']['median_ms']}ms, p95 {g['latency']['p95_ms']}ms")
 
     print()
@@ -235,24 +243,48 @@ def render(s, heading=None):
     else:
         total = nn["total"]
         print(f"\n  {total} command outputs read\n")
-        for label, n in (
-            ("stayed quiet", total - nn["noticed"]),
-            ("flagged a failure", nn["noticed"]),
-            ("   of those, easy to miss", nn["emphatic"]),
+        # Each row's percentage is of ITS OWN denominator, named in the label. An
+        # indented "of those" line divided by the block total instead, which made
+        # the one number this hook is justified by -- easy-to-miss failures as a
+        # share of failures found -- read 18/1349 = 1.3% when it is 18/151 = 11.9%.
+        # A nine-fold understatement of the headline, contradicted three lines
+        # later by prose calling it "the number that justifies this hook".
+        for label, n, denom in (
+            ("stayed quiet", total - nn["noticed"], total),
+            ("flagged a failure", nn["noticed"], total),
+            ("   of those, easy to miss", nn["emphatic"], nn["noticed"]),
         ):
-            print(f"    {label:26} {n:5}  {100*n/total:5.1f}%  {bar(n, total)}")
+            pct = f"{100*n/denom:5.1f}%" if denom else "    --"
+            print(f"    {label:26} {n:5}  {pct}  {bar(n, denom)}")
 
         # Which recovery got named, and how often the classifier was too unsure
         # to name one. A large "too close to call" count means KIND_MARGIN is too
         # strict; recoveries that turn out wrong in practice mean it is too loose.
-        if nn["kinds"] or nn["kind_unsure"]:
-            print("\n  Recovery named for each failure kind:")
-            for name, n in nn["kinds"].items():
-                print(f"    {name:24} {n}")
+        if nn["kinds"] or nn["kind_unsure"] or nn.get("kind_unasked"):
+            print(f"\n  Failure kind, for the {nn['noticed']} flagged:")
+            # needs_code_change is separated because it names no recovery --
+            # jev_notice.KINDS deliberately omits it. Listed under "Recovery
+            # named" it was the largest entry in a list of recoveries that were
+            # never given, which reads as the classifier's best answer working.
+            named = {k: v for k, v in nn["kinds"].items() if k != "needs_code_change"}
+            code = nn["kinds"].get("needs_code_change", 0)
+            if named:
+                print("    recovery named:")
+                for name, n in named.items():
+                    print(f"      {name:22} {n}")
+            if code:
+                print(f"    {'no recovery to name':24} {code}  needs_code_change "
+                      "-- read the output")
             if nn["kind_unsure"]:
                 near = nn["kind_near_tie"]
-                print(f"    {'(none -- too close)':24} {nn['kind_unsure']}"
-                      f"{f', {near} of them a near-tie' if near else ''}")
+                print(f"    {'stayed silent, too close':24} {nn['kind_unsure']}"
+                      f"{f'  ({near} a near-tie)' if near else ''}")
+            # Said out loud rather than omitted. These predate the failure_kind
+            # question, so the block otherwise described 86 of 154 flagged
+            # failures and looked like the whole picture.
+            if nn.get("kind_unasked"):
+                print(f"    {'never asked':24} {nn['kind_unasked']}  logged before the "
+                      "failure-kind question existed")
 
         print(f"\n  median {nn['latency']['median_ms']}ms")
         print("\n  'easy to miss' is the number that justifies this hook. A failure")
@@ -300,12 +332,16 @@ def render(s, heading=None):
         total = sc["total"]
         would, explained = sc["would_flag"], sc["explained"]
         print(f"\n  {total} writes judged\n")
-        for label, n in (
-            ("looked in scope", total - would),
-            ("would have been flagged", would),
-            ("   of those, explained by earlier turns", explained),
+        # Same subset-denominator fix as the notice block: "of those" is of the
+        # flags, not of all writes. This one openly contradicted itself -- 4/106
+        # printed as 3.8% here while the prose below correctly said 57%.
+        for label, n, denom in (
+            ("looked in scope", total - would, total),
+            ("would have been flagged", would, total),
+            ("   of those, explained by earlier turns", explained, would),
         ):
-            print(f"    {label:38} {n:5}  {100*n/total:5.1f}%  {bar(n, total)}")
+            pct = f"{100*n/denom:5.1f}%" if denom else "    --"
+            print(f"    {label:38} {n:5}  {pct}  {bar(n, denom)}")
         if sc["reasons"]:
             print("\n  Why:")
             for name, n in sc["reasons"].items():

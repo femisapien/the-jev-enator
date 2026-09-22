@@ -262,22 +262,30 @@ Two questions decide whether to speak: `output_shows_failure` at ≥0.85 to say
 anything, `exit_status_misleads` at ≥0.45 to say it emphatically. A failure stated
 plainly needs no help; one hidden behind exit 0 does.
 
-Three more classify the *kind* of failure, and name the matching recovery:
+A third question, `failure_kind`, classifies *what kind* of failure it is and
+names the matching recovery:
 
 | | Kind | Looks like | What gets added |
 | :-: | --- | --- | --- |
-| 📦 | missing dependency | `No module named psycopg2`, `command not found` | install it, don't edit the code that needs it |
-| ⏳ | transient | HTTP 429, `ECONNRESET`, a lock held elsewhere | wait and re-run the same command first |
-| ⌨️ | wrong invocation | unknown flag, bad subcommand, mistyped path | fix the command, not the source |
+| 📦 | `missing_dependency` | `No module named psycopg2`, `command not found` | install it, don't edit the code that needs it |
+| ⏳ | `transient` | HTTP 429, `ECONNRESET`, a lock held elsewhere | wait and re-run the same command first |
+| ⌨️ | `wrong_invocation` | unknown flag, bad subcommand, mistyped path | fix the command, not the source |
+| 🔧 | `needs_code_change` | a failing assertion, a type error | *nothing* — see below |
 
 The point is to skip a reasoning call that re-derives what the output already
-said. A 429 wants a retry, not an investigation. All five questions ride in one
-request — Jev bills per input token and the output *is* the state, so five cost
-barely more than two, and the quiet path stays a single ~350ms call.
+said. A 429 wants a retry, not an investigation. All three questions ride in one
+request — Jev bills per input token and the output *is* the state, so three cost
+barely more than one, and the quiet path stays a single ~350ms call.
 
-They're independent probabilities, not a distribution, so a plain assertion
-failure can score low on all three. Then nothing is named — which is correct, as
-that's the case where reading the diff is the actual work.
+It's one `choice` over four mutually exclusive options, so the answer is a
+distribution and the winner has a real margin over second place ([#14](https://github.com/jakenbear/the-jev-enator/pull/14) — before
+that it was three independent yes/no questions walked in a hardcoded order, where
+a barely-there 0.61 beat a near-certain 0.94 for being listed first).
+`needs_code_change` is the "none of the above" escape hatch and names no recovery
+on purpose: without it the probability mass has nowhere to go and an ordinary
+assertion failure gets forced into looking like a bad command. When the winner
+clears 0.45 but not by 0.20, nothing is named — a dead Docker daemon splits 0.49
+missing-dependency / 0.42 transient, and a human couldn't call that one either.
 
 **A hook can only inject text.** It can suggest the retry; it can't perform it,
 set a backoff, or switch providers. If you want Jev to *execute* the recovery, that
@@ -287,6 +295,33 @@ around the call.
 Quiet on all of: passing tests, clean builds, `npm ci` deprecation noise, lint
 warnings with zero errors, `git status`. Outputs under 40 characters skip the API
 call entirely.
+
+`./report.sh` breaks down what it actually did, which is how `KIND_MARGIN` gets
+tuned against your traffic rather than against fixtures (one snapshot from this
+repo's own log; the counts grow every session):
+
+```
+  1514 command outputs read
+
+    stayed quiet                1349   89.1%  #####################...
+    flagged a failure            165   10.9%  ###.....................
+       of those, easy to miss     18   10.9%  ###.....................
+
+  Failure kind, for the 165 flagged:
+    recovery named:
+      missing_dependency     20
+      transient              11
+      wrong_invocation       10
+    no recovery to name      52  needs_code_change -- read the output
+    stayed silent, too close 4
+    never asked              68  logged before the failure-kind question existed
+```
+
+Read the bottom half as coverage, not accuracy. `never asked` is records written
+before `failure_kind` existed; `no recovery to name` is the escape hatch working
+as designed. The rows that judge the classifier are the 41 it named against the 4
+it declined — and `easy to miss` is the number that justifies the hook existing at
+all, since a failure stated plainly needs no help.
 
 Why this one enforces while the completion check doesn't: injecting a sentence
 has a worst case of one wasted paragraph. Blocking a turn has a worst case of
